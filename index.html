@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/lab-logo.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#23415C" />
+    <meta name="description" content="Dynamic Lab Workstation Tracker — find available laboratory workstations and monitor reported device health." />
+    <title>Dynamic Lab Workstation Tracker</title>
+    <script>
+      // Apply the saved theme before first paint to avoid a flash of the wrong theme.
+      (function () {
+        try {
+          var pref = localStorage.getItem("lab-tracker-theme") || "system";
+          if (["light", "dark", "system"].indexOf(pref) === -1) pref = "system";
+          var dark = pref === "dark" || (pref === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+          document.documentElement.dataset.themePref = pref;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.content = dark ? "#0E141B" : "#23415C";
+        } catch (error) {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
