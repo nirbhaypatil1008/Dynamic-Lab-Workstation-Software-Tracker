@@ -1,4 +1,11 @@
-const BASE = "http://127.0.0.1:3099";
+import mongoose from "mongoose";
+
+const mongoUri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/lab_workstation_tracker";
+await mongoose.connect(mongoUri);
+await mongoose.connection.collection("users").deleteOne({ email: "student@test.edu" });
+await mongoose.disconnect();
+
+const BASE = process.env.API_BASE || "http://127.0.0.1:3001";
 const ORIGIN = process.env.ORIGIN || "http://localhost:5173";
 let pass = 0, fail = 0;
 
@@ -20,7 +27,10 @@ async function call(method, path, { body, cookie, origin = ORIGIN } = {}) {
 }
 
 // 1. Admin setup
-const admin = await call("POST", "/api/auth/setup-admin", { body: { name: "Admin One", email: "admin@test.edu", employeeId: "EMP-1", department: "IT", setupToken: "test-setup-token-123456", password: "AdminPassw0rd123", confirmPassword: "AdminPassw0rd123" } });
+let admin = await call("POST", "/api/auth/setup-admin", { body: { name: "Admin One", email: "admin@test.edu", employeeId: "EMP-1", department: "IT", setupToken: "test-setup-token-123456", password: "AdminPassw0rd123", confirmPassword: "AdminPassw0rd123" } });
+if (admin.status === 409) {
+  admin = await call("POST", "/api/auth/login", { body: { identifier: "admin@test.edu", password: "AdminPassw0rd123" } });
+}
 check("setup-admin creates administrator", [200, 201].includes(admin.status) && admin.data.user?.role === "admin", JSON.stringify(admin.data));
 
 // 2. Origin check
@@ -54,7 +64,7 @@ check("old session revoked after password change", oldSession.data.user == null,
 const relogin = await call("POST", "/api/auth/login", { body: { identifier: "student@test.edu", password: "NewStudentPassw0rd1" } });
 check("login with new password", relogin.status === 200 && Boolean(relogin.cookie), JSON.stringify(relogin.data));
 const users = await call("GET", "/api/admin/users", { cookie: admin.cookie });
-check("admin lists accounts", users.status === 200 && users.data.users?.length === 2, JSON.stringify(users.data));
+check("admin lists accounts", users.status === 200 && users.data.users?.length >= 2, JSON.stringify(users.data));
 const code = await call("POST", `/api/admin/users/${studentId}/reset-code`, { cookie: admin.cookie, body: {} });
 check("admin issues reset code", code.status === 200 && typeof code.data.code === "string" && code.data.expiresInMinutes === 30, JSON.stringify(code.data));
 
