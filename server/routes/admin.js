@@ -6,6 +6,9 @@ import { Lab } from "../models/Lab.js";
 import { Alert } from "../models/Alert.js";
 import { User } from "../models/User.js";
 import { Setting } from "../models/Setting.js";
+import { Enrollment } from "../models/Enrollment.js";
+import { Software } from "../models/Software.js";
+import { Metric } from "../models/Metric.js";
 import {
   now,
   newId,
@@ -13,7 +16,9 @@ import {
   audit,
   syncSystemAlerts,
   getAllPublicWorkstations,
-  statusFor
+  statusFor,
+  getLanIp,
+  getServerBaseUrl
 } from "../helpers.js";
 
 const router = Router();
@@ -177,6 +182,34 @@ router.patch("/workstations/:id", async (req, res, next) => {
   }
 });
 
+// DELETE /api/admin/workstations/:id
+router.delete("/workstations/:id", async (req, res, next) => {
+  try {
+    const workstationId = decodeURIComponent(req.params.id);
+    const station = await Workstation.findOne({ id: workstationId });
+    if (!station) {
+      return res.status(404).json({ error: "Workstation not found." });
+    }
+
+    await Promise.all([
+      Workstation.deleteOne({ id: workstationId }),
+      Software.deleteMany({ workstation_id: workstationId }),
+      Metric.deleteMany({ workstation_id: workstationId }),
+      Alert.deleteMany({ workstationId }),
+      Enrollment.deleteMany({ workstation_id: workstationId })
+    ]);
+
+    await audit(req.user.id, "workstation.delete", workstationId);
+
+    return res.json({
+      ok: true,
+      message: `Workstation ${workstationId} and its associated records were deleted successfully.`
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/admin/users
 router.get("/users", async (req, res, next) => {
   try {
@@ -258,6 +291,217 @@ router.get("/reports", async (req, res, next) => {
       generatedAt: now(),
       historicalUsage: null,
       laboratories
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/network-info
+router.get("/network-info", (req, res) => {
+  const lanIp = getLanIp();
+  const baseUrl = getServerBaseUrl(req);
+  return res.json({
+    lanIp,
+    defaultPort: Number(process.env.API_PORT || 3001),
+    serverBaseUrl: baseUrl
+  });
+});
+
+// POST /api/admin/enrollment/generate
+router.post("/enrollment/generate", async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const requestedId = String(body.workstationId || "").trim().toUpperCase();
+    const labName = String(body.lab || "").trim() || "Main Laboratory";
+    const room = String(body.room || "").trim();
+    const customServerUrl = String(body.serverUrl || "").trim();
+    const expiresInMinutes = Math.min(60, Math.max(5, Number(body.expiresInMinutes) || 15));
+
+    let finalStationId = requestedId;
+    if (!finalStationId) {
+      const count = await Workstation.countDocuments();
+      finalStationId = `WS-${String(count + 1).padStart(3, "0")}`;
+    }
+
+    const rawToken = randomBytes(24).toString("base64url");
+    const tokenHash = sha256(rawToken);
+    const enrollmentId = newId();
+    const timestamp = now();
+    const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000).toISOString();
+
+    const baseUrl = customServerUrl || getServerBaseUrl(req);
+    const powershellCommand = `& ([scriptblock]::Create((irm '${baseUrl}/api/enroll/${rawToken}/install.ps1')))`;
+
+    await Enrollment.create({
+      id: enrollmentId,
+      token_hash: tokenHash,
+      created_by_user_id: req.user.id,
+      workstation_id: finalStationId,
+      lab_name: labName,
+      room,
+      status: "pending",
+      progress_message: "Waiting for command execution on target computer...",
+      created_at: timestamp,
+      expires_at: expiresAt
+    });
+
+    await audit(req.user.id, "enrollment.generate", `Generated enrollment for ${finalStationId}`);
+
+    return res.status(201).json({
+      enrollmentId,
+      workstationId: finalStationId,
+      lab: labName,
+      room,
+      command: powershellCommand,
+      serverUrl: baseUrl,
+      expiresAt,
+      expiresInMinutes,
+      status: "pending",
+      progressMessage: "Waiting for command execution on target computer..."
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/enrollment/:id/status
+router.get("/enrollment/:id/status", async (req, res, next) => {
+  try {
+    const enrollmentId = req.params.id;
+    const enrollment = await Enrollment.findOne({ id: enrollmentId });
+    if (!enrollment) {
+      return res.status(404).json({ error: "Enrollment session not found." });
+    }
+
+    if (Date.parse(enrollment.expires_at) <= Date.now() && enrollment.status !== "completed") {
+      enrollment.status = "expired";
+      enrollment.progress_message = "Enrollment session has expired.";
+      await enrollment.save();
+    }
+
+    let isOnline = false;
+    if (enrollment.workstation_id) {
+      const station = await Workstation.findOne({ id: enrollment.workstation_id });
+      if (station && station.last_heartbeat) {
+        const timeout = Number(process.env.HEARTBEAT_TIMEOUT_SECONDS || 90);
+        isOnline = (Date.now() - Date.parse(station.last_heartbeat)) < timeout * 1000;
+        if (isOnline && enrollment.status !== "completed") {
+          enrollment.status = "completed";
+          enrollment.progress_message = "First heartbeat received. Connected & monitoring active!";
+          enrollment.completed_at = now();
+          await enrollment.save();
+        }
+      }
+    }
+
+    return res.json({
+      id: enrollment.id,
+      status: enrollment.status,
+      progressMessage: enrollment.progress_message,
+      errorMessage: enrollment.error_message,
+      workstationId: enrollment.workstation_id,
+      targetHostname: enrollment.target_hostname,
+      targetOs: enrollment.target_os,
+      targetIp: enrollment.target_ip,
+      isOnline,
+      expiresAt: enrollment.expires_at,
+      completedAt: enrollment.completed_at
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/enrollment/:id/cancel
+router.post("/enrollment/:id/cancel", async (req, res, next) => {
+  try {
+    const enrollmentId = req.params.id;
+    const enrollment = await Enrollment.findOne({ id: enrollmentId });
+    if (!enrollment) {
+      return res.status(404).json({ error: "Enrollment session not found." });
+    }
+
+    enrollment.status = "revoked";
+    enrollment.progress_message = "Enrollment session was cancelled by administrator.";
+    await enrollment.save();
+
+    await audit(req.user.id, "enrollment.cancel", `Cancelled enrollment ${enrollment.id}`);
+    return res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/workstations/:id/revoke
+router.post("/workstations/:id/revoke", async (req, res, next) => {
+  try {
+    const workstationId = decodeURIComponent(req.params.id);
+    const station = await Workstation.findOne({ id: workstationId });
+    if (!station) {
+      return res.status(404).json({ error: "Workstation not found." });
+    }
+
+    station.revoked = true;
+    station.revoked_at = now();
+    station.agent_token_hash = sha256(randomBytes(32).toString("hex"));
+    await station.save();
+
+    await audit(req.user.id, "workstation.revoke", `Revoked workstation ${station.id}`);
+
+    const allStations = await getAllPublicWorkstations();
+    const updated = allStations.find(s => s.id === station.id);
+
+    return res.json({ ok: true, workstation: updated, message: "Workstation access has been revoked." });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/workstations/:id/reconnect
+router.post("/workstations/:id/reconnect", async (req, res, next) => {
+  try {
+    const workstationId = decodeURIComponent(req.params.id);
+    const station = await Workstation.findOne({ id: workstationId });
+    if (!station) {
+      return res.status(404).json({ error: "Workstation not found." });
+    }
+
+    const lab = await Lab.findOne({ id: station.lab_id });
+    const labName = lab ? lab.name : "Main Laboratory";
+
+    const rawToken = randomBytes(24).toString("base64url");
+    const tokenHash = sha256(rawToken);
+    const enrollmentId = newId();
+    const timestamp = now();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+    const baseUrl = getServerBaseUrl(req);
+    const powershellCommand = `& ([scriptblock]::Create((irm '${baseUrl}/api/enroll/${rawToken}/install.ps1')))`;
+
+    await Enrollment.create({
+      id: enrollmentId,
+      token_hash: tokenHash,
+      created_by_user_id: req.user.id,
+      workstation_id: station.id,
+      lab_name: labName,
+      room: lab ? lab.room : "",
+      status: "pending",
+      progress_message: `Waiting for reconnection from ${station.id}...`,
+      created_at: timestamp,
+      expires_at: expiresAt
+    });
+
+    await audit(req.user.id, "workstation.reconnect_command", `Generated reconnection command for ${station.id}`);
+
+    return res.status(201).json({
+      enrollmentId,
+      workstationId: station.id,
+      lab: labName,
+      command: powershellCommand,
+      serverUrl: baseUrl,
+      expiresAt,
+      status: "pending"
     });
   } catch (err) {
     next(err);

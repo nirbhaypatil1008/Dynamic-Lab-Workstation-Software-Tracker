@@ -9,16 +9,18 @@ import authRoutes from "./routes/auth.js";
 import studentRoutes from "./routes/student.js";
 import adminRoutes from "./routes/admin.js";
 import agentRoutes from "./routes/agent.js";
+import enrollRoutes from "./routes/enroll.js";
 
 const app = express();
 const port = Number(process.env.API_PORT || 3001);
-const host = process.env.API_HOST || "127.0.0.1";
+const host = process.env.API_HOST || "0.0.0.0";
 const defaultOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
   if (origin === defaultOrigin) return true;
-  if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  if (/^https?:\/\/(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/.test(origin)) return true;
   return false;
 }
 
@@ -90,6 +92,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/student", studentRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/agent", agentRoutes);
+app.use("/api/enroll", enrollRoutes);
 
 // Catch-all 404
 app.use((req, res) => {

@@ -14,6 +14,10 @@ const workstationSchema = new mongoose.Schema({
   activity_status: { type: String, default: "unknown" },
   maintenance: { type: Boolean, default: false },
   maintenance_note: { type: String, default: "" },
+  ip_address: { type: String, default: "" },
+  agent_version: { type: String, default: "1.0.0" },
+  revoked: { type: Boolean, default: false },
+  revoked_at: { type: String, default: null },
   agent_token_hash: { type: String, required: true },
   created_at: { type: String, required: true }
 }, {

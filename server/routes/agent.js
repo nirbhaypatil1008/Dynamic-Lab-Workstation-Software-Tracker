@@ -2,6 +2,7 @@ import { Router } from "express";
 import { Workstation } from "../models/Workstation.js";
 import { Software } from "../models/Software.js";
 import { Metric } from "../models/Metric.js";
+import { Enrollment } from "../models/Enrollment.js";
 import { now, sha256 } from "../helpers.js";
 
 const router = Router();
@@ -22,8 +23,8 @@ async function authenticateAgent(req, res, next) {
       agent_token_hash: sha256(token)
     });
 
-    if (!station) {
-      return res.status(401).json({ error: "Agent credential or workstation identity is invalid." });
+    if (!station || station.revoked) {
+      return res.status(401).json({ error: "Agent credential or workstation identity is invalid or has been revoked." });
     }
 
     req.station = station;
@@ -54,8 +55,25 @@ router.post("/heartbeat", async (req, res, next) => {
     req.station.last_heartbeat = timestamp;
     req.station.last_sync = timestamp;
     req.station.activity_status = activity;
+    req.station.ip_address = req.ip || req.socket.remoteAddress || req.station.ip_address || "";
+    if (body.agentVersion) {
+      req.station.agent_version = String(body.agentVersion).slice(0, 32);
+    }
 
     await req.station.save();
+
+    // Mark any active enrollment for this workstation as completed
+    await Enrollment.updateMany(
+      {
+        workstation_id: req.station.id,
+        status: { $in: ["pending", "command_executed", "installing", "registering", "claimed"] }
+      },
+      {
+        status: "completed",
+        progress_message: "First heartbeat received. Connected & monitoring active!",
+        completed_at: timestamp
+      }
+    );
 
     return res.json({ ok: true, serverTime: timestamp });
   } catch (err) {

@@ -1,4 +1,5 @@
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from "node:crypto";
+import os from "node:os";
 import bcrypt from "bcryptjs";
 import { AuditLog } from "./models/AuditLog.js";
 import { Alert } from "./models/Alert.js";
@@ -53,8 +54,48 @@ export async function audit(userId, action, detail) {
   }
 }
 
+export function getLanIp() {
+  const interfaces = os.networkInterfaces();
+  let fallback = "127.0.0.1";
+
+  // Prioritize physical adapters (Wi-Fi, Ethernet) over virtual/hotspot adapters
+  for (const name of Object.keys(interfaces)) {
+    const isVirtual = /virtual|vethernet|pseudo|tap|tun|local area connection\*/i.test(name);
+    for (const iface of interfaces[name]) {
+      if (iface.family === "IPv4" && !iface.internal) {
+        if (!isVirtual && !iface.address.startsWith("169.254.") && !iface.address.startsWith("192.168.137.")) {
+          return iface.address;
+        }
+        if (fallback === "127.0.0.1") {
+          fallback = iface.address;
+        }
+      }
+    }
+  }
+  return fallback;
+}
+
+export function getServerBaseUrl(req) {
+  if (process.env.SERVER_BASE_URL || process.env.API_BASE_URL) {
+    return (process.env.SERVER_BASE_URL || process.env.API_BASE_URL).replace(/\/+$/, "");
+  }
+  const hostHeader = (req && req.get && req.get("host")) || `127.0.0.1:${process.env.API_PORT || 3001}`;
+  const isLocal = hostHeader.includes("localhost") || hostHeader.includes("127.0.0.1");
+  const protocol = (req && req.protocol === "https") || (req && req.get && req.get("x-forwarded-proto") === "https") ? "https" : "http";
+
+  if (isLocal) {
+    const lanIp = getLanIp();
+    const port = hostHeader.includes(":") ? hostHeader.split(":")[1] : (process.env.API_PORT || 3001);
+    if (lanIp && lanIp !== "127.0.0.1") {
+      return `http://${lanIp}:${port}`;
+    }
+  }
+  return `${protocol}://${hostHeader}`;
+}
+
 export function statusFor(station, metric) {
   const heartbeatTimeout = Number(process.env.HEARTBEAT_TIMEOUT_SECONDS || 90);
+  if (station.revoked) return "Revoked";
   if (station.maintenance) return "Maintenance";
   if (!station.last_heartbeat || Date.now() - Date.parse(station.last_heartbeat) > heartbeatTimeout * 1000) return "Offline";
   if (!metric?.reported_at || Date.now() - Date.parse(metric.reported_at) > 180_000) return "Unknown";
@@ -112,6 +153,11 @@ export function formatPublicWorkstation(row, lab, metric, softwareList) {
     lab: lab ? lab.name : "",
     room: lab ? lab.room : "",
     status: stationStatus,
+    revoked: Boolean(row.revoked),
+    revokedAt: row.revoked_at || null,
+    ipAddress: row.ip_address || "Not reported",
+    agentVersion: row.agent_version || "1.0.0",
+    lastSync: row.last_sync || row.last_heartbeat || null,
     os: row.os || "",
     cpu: row.cpu || "",
     memoryTotalBytes: row.memory_total_bytes,

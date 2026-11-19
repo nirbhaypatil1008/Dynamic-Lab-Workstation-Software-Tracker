@@ -2,13 +2,58 @@ import "./style.css";
 
 const API_URL = (import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "" : "http://localhost:3001")).replace(/\/$/, "");
 const app = document.querySelector("#app");
+
+let enrollmentPollTimer = null;
+
+function stopEnrollmentPolling() {
+  if (enrollmentPollTimer) {
+    clearInterval(enrollmentPollTimer);
+    enrollmentPollTimer = null;
+  }
+}
+
+function startEnrollmentPolling(enrollmentId) {
+  stopEnrollmentPolling();
+  enrollmentPollTimer = setInterval(async () => {
+    if (!state.activeEnrollment || state.activeEnrollment.enrollmentId !== enrollmentId) {
+      stopEnrollmentPolling();
+      return;
+    }
+    try {
+      const statusRes = await api(`/api/admin/enrollment/${encodeURIComponent(enrollmentId)}/status`);
+      if (state.activeEnrollment && state.activeEnrollment.enrollmentId === enrollmentId) {
+        const prevStatus = state.activeEnrollment.status;
+        state.activeEnrollment.status = statusRes.status;
+        state.activeEnrollment.progressMessage = statusRes.progressMessage;
+        state.activeEnrollment.errorMessage = statusRes.errorMessage;
+        state.activeEnrollment.targetHostname = statusRes.targetHostname;
+        state.activeEnrollment.targetIp = statusRes.targetIp;
+
+        if (statusRes.status === "completed" || statusRes.status === "expired" || statusRes.status === "revoked" || statusRes.status === "failed") {
+          stopEnrollmentPolling();
+          if (statusRes.status === "completed" && prevStatus !== "completed") {
+            state.message = `Workstation ${statusRes.workstationId} successfully connected and active!`;
+          }
+        }
+        await refresh({ preserveFocus: true });
+      }
+    } catch {
+      // Ignore polling transient errors
+    }
+  }, 2500);
+}
+
 const state = {
   user: null,
   authMode: "login",
   page: "Dashboard",
   returnPage: "Dashboard",
   selectedWorkstationId: "",
+  selectedLabName: "",
+  viewMode: "grid",
+  sortBy: "id-asc",
   workstationSoftwareSearch: "",
+  labSearch: "",
   error: "",
   message: "",
   search: "",
@@ -18,6 +63,9 @@ const state = {
   os: "",
   availability: "",
   agentCredential: null,
+  activeEnrollment: null,
+  enrollmentCopied: false,
+  showManualSetup: false,
   resetCredential: null,
   authLoading: false,
   listPages: {},
@@ -26,12 +74,25 @@ const state = {
   profileDraft: null,
   authDraft: {},
   workstationDraft: null,
-  formBusy: false
+  formBusy: false,
+  apiLatency: 12,
+  activeCategory: "All Workstations",
+  userMenuOpen: false,
+  favorites: (() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem("lab-favorites") || "[]"));
+    } catch {
+      return new Set();
+    }
+  })()
 };
 
 const studentPages = ["Dashboard", "Find a Workstation", "Laboratories", "Profile", "Settings"];
 const adminPages = ["Overview", "Workstations", "Laboratories", "Software Inventory", "System Health", "Alerts", "Maintenance", "Reports", "Accounts", "Profile", "Settings"];
 const pageSubtitles = {
+  Dashboard: "Real-time laboratory ecosystem overview, capacity intelligence, and quick discovery actions.",
+  "Find a Workstation": "Search computer specifications, installed software, and real-time availability before visiting a lab.",
+  Laboratories: "Explore laboratory facilities, room configurations, and hardware allocations.",
   Profile: "View and update your account details and password.",
   Settings: "Manage appearance and account security preferences.",
   Accounts: "Review campus accounts and issue one-time password reset codes."
@@ -345,7 +406,32 @@ function icon(name) {
     Settings: '<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.94 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15.06 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9c.2.62.77 1.05 1.42 1.06H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1.03z"></path>',
     Accounts: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path>',
     Menu: '<path d="M4 6h16M4 12h16M4 18h16"></path>',
-    "Refresh data": '<path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.5 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 12.5-3"></path>'
+    "Refresh data": '<path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.5 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 12.5-3"></path>',
+    CheckCircle: '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>',
+    UserCheck: '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><polyline points="17 11 19 13 23 9"></polyline>',
+    PowerOff: '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line>',
+    Server: '<rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line>',
+    Grid: '<rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect>',
+    List: '<line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>',
+    Activity: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>',
+    Cpu: '<rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line>',
+    ArrowRight: '<line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline>',
+    Zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>',
+    Filter: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>',
+    Clock: '<circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>',
+    Shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>',
+    Search: '<circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>',
+    X: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
+    Sun: '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>',
+    Moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>',
+    Heart: '<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>',
+    HeartFilled: '<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" fill="#FF385C" stroke="#FF385C"></path>',
+    Code: '<polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline>',
+    DatabaseIcon: '<ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>',
+    ShieldCheck: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="m9 12 2 2 4-4"></path>',
+    Palette: '<circle cx="13.5" cy="6.5" r=".5" fill="currentColor"></circle><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"></circle><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"></circle><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"></circle><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.563-2.512 5.563-5.563C22 6.5 17.5 2 12 2z"></path>',
+    NetworkIcon: '<rect x="16" y="16" width="6" height="6" rx="1"></rect><rect x="2" y="16" width="6" height="6" rx="1"></rect><rect x="9" y="2" width="6" height="6" rx="1"></rect><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3M12 12V8"></path>',
+    Sparkles: '<path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"></path>'
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.Dashboard}</svg>`;
 }
@@ -419,28 +505,138 @@ function navLabels() {
 }
 
 function renderShell(content) {
-  const pages = navLabels();
   const displayName = state.user.name || state.user.email;
+  const initial = (displayName[0] || "S").toUpperCase();
+  const isDark = themePreference() === "dark" || (themePreference() === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const isStudent = state.user.role === "student";
+
   app.innerHTML = `
-    <div class="app-shell">
-      <aside class="sidebar">
-        <div class="brand-wrap"><img class="brand-logo" src="/lab-logo.png" alt="Dynamic Lab logo" /><div><p class="brand-title">Dynamic Lab</p><span class="brand-subtitle">Workstation Tracker</span></div><button type="button" class="mobile-nav-toggle" data-action="toggle-nav" aria-expanded="false" aria-controls="main-nav" aria-label="Toggle navigation menu">${icon("Menu")}</button></div>
-        <nav id="main-nav" class="nav-group" aria-label="Main navigation">
-          ${pages.map((page) => `<button type="button" class="nav-item ${state.page === page ? "active" : ""}" data-page="${escapeHtml(page)}" ${state.page === page ? 'aria-current="page"' : ""}>${icon(page)}<span>${escapeHtml(page)}</span></button>`).join("")}
-          <button type="button" class="nav-item" data-action="logout">${icon("Sign out")}<span>Sign out</span></button>
-        </nav>
-      </aside>
-      <main class="main-area">
-        <header class="topbar">
-          <div><p class="eyebrow">${state.user.role === "admin" ? "Administrator portal" : "Student portal"}</p><h1>${escapeHtml(state.page === "System details" ? state.selectedWorkstationId : state.page)}</h1></div>
-          <div class="header-actions"><span class="user-label">${escapeHtml(displayName)} · ${escapeHtml(state.user.role)}</span><button type="button" class="secondary-button" data-action="refresh" aria-label="Refresh current page">${icon("Refresh data")}<span>Refresh data</span></button></div>
-        </header>
-        <p class="page-subtitle">${state.page === "System details" ? "Review structured system information and search its detected software inventory." : pageSubtitles[state.page] || (state.user.role === "admin" ? "Monitor authorized workstation reports and manage lab equipment." : "Search reported software inventory and check workstation status before visiting a lab.")}</p>
+    <div class="airbnb-app-layout">
+      <!-- Sticky Desktop & Tablet Header -->
+      <header class="airbnb-header">
+        <div class="airbnb-header-inner">
+          <!-- Left: Logo & Brand -->
+          <a href="#/dashboard" class="airbnb-brand" data-page="Dashboard" aria-label="Dynamic Lab Home">
+            <img class="airbnb-logo" src="/lab-logo.png" alt="Dynamic Lab logo" />
+            <div class="airbnb-brand-text">
+              <span class="airbnb-brand-title">Dynamic Lab</span>
+              <span class="airbnb-brand-subtitle">Workstation Tracker</span>
+            </div>
+          </a>
+
+          <!-- Center: Airbnb Pill Navigation -->
+          <nav class="airbnb-center-nav" aria-label="Main navigation">
+            <button type="button" class="airbnb-nav-pill ${state.page === "Dashboard" ? "active" : ""}" data-page="Dashboard" ${state.page === "Dashboard" ? 'aria-current="page"' : ""}>
+              ${icon("Dashboard")}
+              <span>Dashboard</span>
+            </button>
+            <button type="button" class="airbnb-nav-pill ${state.page === "Find a Workstation" ? "active" : ""}" data-page="Find a Workstation" ${state.page === "Find a Workstation" ? 'aria-current="page"' : ""}>
+              ${icon("Find a Workstation")}
+              <span>Find Workstations</span>
+            </button>
+            <button type="button" class="airbnb-nav-pill ${state.page === "Laboratories" ? "active" : ""}" data-page="Laboratories" ${state.page === "Laboratories" ? 'aria-current="page"' : ""}>
+              ${icon("Laboratories")}
+              <span>Laboratories</span>
+            </button>
+            ${!isStudent ? `
+              <button type="button" class="airbnb-nav-pill ${adminPages.includes(state.page) && !["Dashboard", "Find a Workstation", "Laboratories", "Profile", "Settings"].includes(state.page) ? "active" : ""}" data-page="Overview">
+                ${icon("Server")}
+                <span>Admin Hub</span>
+              </button>
+            ` : ""}
+          </nav>
+
+          <!-- Right: Theme Switcher, Telemetry Refresh & User Capsule -->
+          <div class="airbnb-right-actions">
+            <button type="button" class="airbnb-icon-btn" data-action="toggle-theme" title="Switch theme (${isDark ? "Dark" : "Light"})" aria-label="Toggle theme">
+              ${icon(isDark ? "Sun" : "Moon")}
+            </button>
+            <button type="button" class="airbnb-icon-btn" data-action="refresh" title="Refresh live telemetry" aria-label="Refresh telemetry">
+              ${icon("Refresh data")}
+            </button>
+            
+            <div class="airbnb-user-menu-wrapper">
+              <button type="button" class="airbnb-user-capsule" data-action="toggle-user-dropdown" aria-haspopup="true" aria-expanded="${state.userMenuOpen ? "true" : "false"}" aria-label="User account menu">
+                <span class="airbnb-hamburger-lines">${icon("Menu")}</span>
+                <div class="airbnb-avatar-circle">${escapeHtml(initial)}</div>
+                <span class="airbnb-user-firstname">${escapeHtml(state.user.name ? state.user.name.split(" ")[0] : "Student")}</span>
+              </button>
+
+              ${state.userMenuOpen ? `
+                <div class="airbnb-dropdown-menu" id="user-dropdown-menu" role="menu">
+                  <div class="dropdown-header">
+                    <strong>${escapeHtml(displayName)}</strong>
+                    <span class="dropdown-role-badge">${escapeHtml(state.user.role)} ${state.user.department ? `· ${escapeHtml(state.user.department)}` : ""}</span>
+                    ${state.user.identifier ? `<span class="dropdown-usn">USN / ID: ${escapeHtml(state.user.identifier)}</span>` : ""}
+                  </div>
+                  <div class="dropdown-divider"></div>
+                  
+                  <button type="button" class="dropdown-item" data-page="Dashboard">
+                    ${icon("Dashboard")} <span>Dashboard Explore</span>
+                  </button>
+                  <button type="button" class="dropdown-item" data-page="Find a Workstation">
+                    ${icon("Find a Workstation")} <span>Find a Workstation</span>
+                  </button>
+                  <button type="button" class="dropdown-item" data-page="Laboratories">
+                    ${icon("Laboratories")} <span>Explore Laboratories</span>
+                  </button>
+                  <button type="button" class="dropdown-item" data-page="Profile">
+                    ${icon("Profile")} <span>My Profile</span>
+                  </button>
+                  <button type="button" class="dropdown-item" data-page="Settings">
+                    ${icon("Settings")} <span>Settings & Appearance</span>
+                  </button>
+
+                  ${!isStudent ? `
+                    <div class="dropdown-divider"></div>
+                    <div class="dropdown-section-title">Admin Management</div>
+                    <button type="button" class="dropdown-item" data-page="Overview">${icon("Overview")} <span>Overview</span></button>
+                    <button type="button" class="dropdown-item" data-page="Workstations">${icon("Workstations")} <span>Workstation Fleet</span></button>
+                    <button type="button" class="dropdown-item" data-page="Accounts">${icon("Accounts")} <span>Account Manager</span></button>
+                    <button type="button" class="dropdown-item" data-page="Software Inventory">${icon("Software Inventory")} <span>Software Catalog</span></button>
+                    <button type="button" class="dropdown-item" data-page="System Health">${icon("System Health")} <span>System Health</span></button>
+                    <button type="button" class="dropdown-item" data-page="Alerts">${icon("Alerts")} <span>Alerts & Telemetry</span></button>
+                    <button type="button" class="dropdown-item" data-page="Reports">${icon("Reports")} <span>Operational Reports</span></button>
+                  ` : ""}
+
+                  <div class="dropdown-divider"></div>
+                  <button type="button" class="dropdown-item text-danger" data-action="logout">
+                    ${icon("Sign out")} <span>Sign out</span>
+                  </button>
+                </div>
+              ` : ""}
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Main Content Area -->
+      <main class="airbnb-main-content">
         ${state.error ? `<div class="notice error-notice" role="alert">${escapeHtml(state.error)}</div>` : ""}
         ${state.message ? `<div class="notice success-notice" role="status">${escapeHtml(state.message)}</div>` : ""}
         <div id="page-content">${content}</div>
         ${footer()}
       </main>
+
+      <!-- Fixed Touch-Friendly Mobile Bottom Navigation -->
+      <nav class="mobile-bottom-nav" aria-label="Mobile Navigation">
+        <button type="button" class="mobile-nav-btn ${state.page === "Dashboard" ? "active" : ""}" data-page="Dashboard">
+          ${icon("Dashboard")}
+          <span>Explore</span>
+        </button>
+        <button type="button" class="mobile-nav-btn ${state.page === "Find a Workstation" ? "active" : ""}" data-page="Find a Workstation">
+          ${icon("Find a Workstation")}
+          <span>Discover</span>
+        </button>
+        <button type="button" class="mobile-nav-btn ${state.page === "Laboratories" ? "active" : ""}" data-page="Laboratories">
+          ${icon("Laboratories")}
+          <span>Labs</span>
+        </button>
+        <button type="button" class="mobile-nav-btn ${state.page === "Profile" ? "active" : ""}" data-page="Profile">
+          ${icon("Profile")}
+          <span>Profile</span>
+        </button>
+      </nav>
     </div>`;
 }
 
@@ -467,9 +663,12 @@ function formatDate(value) {
 }
 
 function structuredFields(fields) {
-  return `<dl class="structured-fields">${fields.map(([label, value]) =>
-    `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value ?? "Not reported")}</dd></div>`
-  ).join("")}</dl>`;
+  return `<dl class="structured-fields">${fields.map(([label, value]) => {
+    const displayValue = (value !== null && value !== undefined && String(value).trim() !== "")
+      ? String(value)
+      : "Not reported";
+    return `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(displayValue)}</dd></div>`;
+  }).join("")}</dl>`;
 }
 
 function softwareDetails(items, label = "Detected software") {
@@ -510,7 +709,8 @@ function structuredWorkstationDetails(item) {
     <div class="structured-detail-grid">
       <section><h4>Identification</h4>${structuredFields([
         ["Workstation ID", item.id], ["Hostname", item.hostname],
-        ["Laboratory", item.lab], ["Room", item.room], ["Status", item.status]
+        ["Laboratory", item.lab], ["Room", item.room], ["Status", item.status],
+        ["IP Address", item.ipAddress || "Not reported"], ["Agent Version", item.agentVersion || "1.0.0"]
       ])}</section>
       <section><h4>System and hardware</h4>${structuredFields([
         ["Operating system", item.os], ["Processor", item.cpu],
@@ -563,7 +763,16 @@ function renderWorkstationPage(item) {
     <section class="panel workstation-hero">
       <div class="workstation-hero-heading">
         <div><p class="eyebrow">Full system record · ${escapeHtml(item.lab)}</p><h2>${escapeHtml(item.id)}</h2><p class="muted-copy">${escapeHtml(item.hostname || "Hostname not reported")} · ${escapeHtml(item.room || "Room not reported")}</p></div>
-        ${badge(item.status)}
+        <div class="hero-status-group">
+          ${item.revoked || item.status === "Revoked" ? `<span class="badge danger">Revoked</span>` : badge(item.status)}
+          ${state.user?.role === "admin" ? `
+            <div class="hero-admin-actions">
+              <button type="button" class="secondary-button compact-button" data-action="reconnect-workstation" data-id="${escapeHtml(item.id)}" title="Generate 1-command installer">⚡ Reconnect</button>
+              ${!item.revoked && item.status !== "Revoked" ? `<button type="button" class="secondary-button compact-button danger-button-text" data-action="revoke-workstation" data-id="${escapeHtml(item.id)}">Revoke Access</button>` : ""}
+              <button type="button" class="secondary-button compact-button delete-pc-btn" data-action="delete-workstation" data-id="${escapeHtml(item.id)}" title="Permanently delete this registered workstation">Delete Workstation</button>
+            </div>
+          ` : ""}
+        </div>
       </div>
       <p class="data-note">${item.inventoryFreshness === "Fresh" ? "Inventory is recently reported by the authorized agent." : "The inventory is stale or missing. Treat this software list as last reported information, not confirmation of current installation."}</p>
     </section>
@@ -571,7 +780,8 @@ function renderWorkstationPage(item) {
       <div class="panel-header"><div><p class="eyebrow">Structured system information</p><h3>Workstation details</h3></div></div>
       <div class="system-detail-sections">
         <section><h4>Identification and assignment</h4>${structuredFields([
-          ["Workstation ID", item.id], ["Hostname", item.hostname], ["Laboratory", item.lab], ["Room", item.room], ["Status", item.status]
+          ["Workstation ID", item.id], ["Hostname", item.hostname], ["Laboratory", item.lab], ["Room", item.room], ["Status", item.status],
+          ["IP Address", item.ipAddress || "Not reported"], ["Agent Version", item.agentVersion || "1.0.0"]
         ])}</section>
         <section><h4>Operating system and hardware</h4>${structuredFields([
           ["Operating system", item.os], ["Processor", item.cpu], ["Memory capacity", formatBytes(item.memoryTotalBytes)], ["Disk capacity", formatBytes(item.diskTotalBytes)]
@@ -752,6 +962,1118 @@ function renderAccountsPage(users) {
   </section>`;
 }
 
+/* ---------------- Helpers for Redesigned Student Portal (Airbnb Pattern) ---------------- */
+
+function timeAgo(value) {
+  if (!value) return "Not reported";
+  const date = new Date(value);
+  const now = new Date();
+  const diffSec = Math.floor((now.getTime() - date.getTime()) / 1000);
+  if (Number.isNaN(diffSec) || diffSec < 0) return "Just now";
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour}h ago`;
+  const diffDay = Math.floor(diffHour / 24);
+  if (diffDay < 30) return `${diffDay}d ago`;
+  return date.toLocaleDateString();
+}
+
+function categorizeSoftware(name = "") {
+  const n = String(name).toLowerCase();
+  if (n.includes("python") || n.includes("java") || n.includes("node") || n.includes("c++") || n.includes("gcc") || n.includes("rust") || n.includes("go") || n.includes("sdk")) return "Dev";
+  if (n.includes("mongo") || n.includes("sql") || n.includes("db") || n.includes("postgres") || n.includes("redis")) return "Database";
+  if (n.includes("code") || n.includes("studio") || n.includes("intellij") || n.includes("pycharm") || n.includes("eclipse")) return "IDE";
+  if (n.includes("wireshark") || n.includes("nmap") || n.includes("packet") || n.includes("security") || n.includes("burp") || n.includes("ssh")) return "Security";
+  if (n.includes("git") || n.includes("docker") || n.includes("postman") || n.includes("terminal")) return "Tools";
+  if (n.includes("office") || n.includes("word") || n.includes("excel") || n.includes("chrome") || n.includes("pdf")) return "Productivity";
+  return "System";
+}
+
+function matchesCategory(ws, category) {
+  if (!category || category === "All Workstations") return true;
+  if (category === "Available Now") return ws.status === "Available";
+  const soft = (ws.software || []).map((s) => (s.name || "").toLowerCase()).join(" ");
+  const lab = (ws.lab || "").toLowerCase();
+
+  if (category === "Programming") {
+    return /python|java|c\+\+|gcc|rust|golang|node|sdk|ruby|php|clang|visual studio|vs code|intellij|eclipse|pycharm/i.test(soft) || lab.includes("programming");
+  }
+  if (category === "Cybersecurity") {
+    return /wireshark|nmap|burp|metasploit|snort|kali|security|packet|hashcat|hydra|aircrack|cisco/i.test(soft) || lab.includes("cyber") || lab.includes("security");
+  }
+  if (category === "Database") {
+    return /mongo|sql|postgres|redis|db|mariadb|sqlite|oracle|cassandra|dbeaver|compass/i.test(soft) || lab.includes("database");
+  }
+  if (category === "AI & Machine Learning") {
+    return /python|pytorch|tensorflow|cuda|anaconda|jupyter|scikit|pandas|numpy|keras|opencv/i.test(soft) || lab.includes("ai") || lab.includes("ml") || lab.includes("intelligence");
+  }
+  if (category === "Web Development") {
+    return /node|npm|react|vue|angular|postman|nginx|apache|html|css|javascript|typescript|chrome|firefox|yarn/i.test(soft) || lab.includes("web");
+  }
+  if (category === "Design Tools") {
+    return /figma|blender|photoshop|gimp|illustrator|inkscape|cad|autocad|maya|sketch/i.test(soft) || lab.includes("multimedia") || lab.includes("design");
+  }
+  if (category === "Networking") {
+    return /wireshark|packet tracer|putty|ssh|telnet|cisco|gns3|ns3|tcpdump|nmap/i.test(soft) || lab.includes("network");
+  }
+  return true;
+}
+
+function svgWorkstationIllustration(ws = {}) {
+  const status = ws.status || "Unknown";
+  const glowColor = status === "Available" ? "#10B981" :
+                    status === "In use" ? "#0284C7" :
+                    status === "Idle" ? "#F59E0B" :
+                    status === "Maintenance" ? "#8B5CF6" : "#64748B";
+  const safeId = (ws.id || "ws").replace(/[^a-zA-Z0-9]/g, "-");
+  const bgGradId = `ws-bg-${safeId}`;
+  const screenGradId = `scr-${safeId}`;
+  const isAvailable = status === "Available";
+
+  return `
+    <svg class="airbnb-listing-illustration" viewBox="0 0 320 200" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="${bgGradId}" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#1A2332" />
+          <stop offset="100%" stop-color="#0E141E" />
+        </linearGradient>
+        <linearGradient id="${screenGradId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#0F172A" />
+          <stop offset="100%" stop-color="#1E293B" />
+        </linearGradient>
+        <filter id="glow-${safeId}" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="8" result="blur" />
+          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+      </defs>
+      <!-- Background Wall & Room -->
+      <rect width="320" height="200" fill="url(#${bgGradId})" />
+      
+      <!-- Subtle Lab Ambient Grid -->
+      <g opacity="0.07" stroke="#94A3B8" stroke-width="1">
+        <line x1="0" y1="40" x2="320" y2="40" />
+        <line x1="0" y1="80" x2="320" y2="80" />
+        <line x1="0" y1="120" x2="320" y2="120" />
+        <line x1="80" y1="0" x2="80" y2="160" />
+        <line x1="160" y1="0" x2="160" y2="160" />
+        <line x1="240" y1="0" x2="240" y2="160" />
+      </g>
+      
+      <!-- Monitor Ambient Backlight Glow -->
+      <ellipse cx="160" cy="85" rx="85" ry="50" fill="${glowColor}" opacity="0.22" filter="url(#glow-${safeId})" />
+
+      <!-- Modern Desk Surface -->
+      <polygon points="20,158 300,158 320,200 0,200" fill="#243042" />
+      <line x1="0" y1="158" x2="320" y2="158" stroke="#334155" stroke-width="2" />
+      <line x1="0" y1="162" x2="320" y2="162" stroke="${glowColor}" stroke-width="1" opacity="0.3" />
+
+      <!-- Monitor Stand -->
+      <path d="M152 135 L168 135 L164 162 L156 162 Z" fill="#475569" />
+      <ellipse cx="160" cy="163" rx="26" ry="4" fill="#334155" stroke="#475569" stroke-width="1" />
+
+      <!-- Monitor Outer Frame -->
+      <rect x="75" y="32" width="170" height="106" rx="6" fill="#0B0F17" stroke="#334155" stroke-width="2" />
+
+      <!-- Monitor Screen Panel -->
+      <rect x="80" y="37" width="160" height="96" rx="3" fill="url(#${screenGradId})" />
+
+      <!-- Screen UI Content (Code / Terminal / Status Glow) -->
+      ${isAvailable ? `
+        <g opacity="0.9">
+          <circle cx="90" cy="46" r="2.5" fill="#EF4444" />
+          <circle cx="98" cy="46" r="2.5" fill="#F59E0B" />
+          <circle cx="106" cy="46" r="2.5" fill="#10B981" />
+          <line x1="88" y1="56" x2="135" y2="56" stroke="#10B981" stroke-width="2.5" stroke-linecap="round" />
+          <line x1="88" y1="66" x2="185" y2="66" stroke="#38BDF8" stroke-width="1.8" stroke-linecap="round" opacity="0.75" />
+          <line x1="88" y1="74" x2="155" y2="74" stroke="#94A3B8" stroke-width="1.8" stroke-linecap="round" opacity="0.5" />
+          <line x1="88" y1="82" x2="215" y2="82" stroke="#A78BFA" stroke-width="1.8" stroke-linecap="round" opacity="0.6" />
+          <line x1="88" y1="90" x2="140" y2="90" stroke="#10B981" stroke-width="1.8" stroke-linecap="round" opacity="0.8" />
+          <rect x="88" y="100" width="8" height="12" fill="#10B981" opacity="0.8" />
+          <text x="100" y="110" font-family="monospace" font-size="8" fill="#10B981" font-weight="bold">ONLINE</text>
+        </g>
+      ` : status === "In use" ? `
+        <g opacity="0.9">
+          <rect x="84" y="42" width="28" height="86" fill="#0D1117" opacity="0.6" />
+          <line x1="90" y1="50" x2="104" y2="50" stroke="#38BDF8" stroke-width="1.5" />
+          <line x1="90" y1="56" x2="108" y2="56" stroke="#94A3B8" stroke-width="1.5" />
+          <line x1="90" y1="62" x2="102" y2="62" stroke="#94A3B8" stroke-width="1.5" />
+          <line x1="120" y1="52" x2="180" y2="52" stroke="#F472B6" stroke-width="2" stroke-linecap="round" />
+          <line x1="120" y1="62" x2="220" y2="62" stroke="#38BDF8" stroke-width="2" stroke-linecap="round" />
+          <line x1="130" y1="72" x2="195" y2="72" stroke="#34D399" stroke-width="1.8" stroke-linecap="round" />
+          <line x1="130" y1="82" x2="205" y2="82" stroke="#FBBF24" stroke-width="1.8" stroke-linecap="round" />
+          <line x1="120" y1="92" x2="160" y2="92" stroke="#818CF8" stroke-width="2" stroke-linecap="round" />
+          <text x="175" y="118" font-family="sans-serif" font-size="8" fill="#38BDF8" font-weight="600">IN USE</text>
+        </g>
+      ` : `
+        <g opacity="0.4" text-anchor="middle">
+          <circle cx="160" cy="80" r="14" fill="none" stroke="#64748B" stroke-width="2" />
+          <line x1="160" y1="72" x2="160" y2="82" stroke="#64748B" stroke-width="2" stroke-linecap="round" />
+          <text x="160" y="110" font-family="sans-serif" font-size="8" fill="#64748B">STANDBY</text>
+        </g>
+      `}
+
+      <!-- Slim Modern Keyboard -->
+      <rect x="110" y="168" width="100" height="18" rx="3" fill="#1E293B" stroke="#334155" stroke-width="1" />
+      <g opacity="0.3" fill="#64748B">
+        <rect x="115" y="171" width="10" height="4" rx="1" />
+        <rect x="128" y="171" width="10" height="4" rx="1" />
+        <rect x="141" y="171" width="10" height="4" rx="1" />
+        <rect x="154" y="171" width="10" height="4" rx="1" />
+        <rect x="167" y="171" width="10" height="4" rx="1" />
+        <rect x="180" y="171" width="10" height="4" rx="1" />
+        <rect x="193" y="171" width="12" height="4" rx="1" />
+        <rect x="135" y="179" width="50" height="4" rx="1" />
+      </g>
+
+      <!-- Ergonomic Mouse -->
+      <rect x="225" y="170" width="14" height="20" rx="6" fill="#1E293B" stroke="#334155" stroke-width="1" />
+      <line x1="232" y1="171" x2="232" y2="178" stroke="#475569" stroke-width="1" />
+      
+      <!-- Tower Case Silhouette on Right -->
+      <rect x="260" y="80" width="36" height="85" rx="3" fill="#111827" stroke="#1F2937" stroke-width="1.5" />
+      <circle cx="278" cy="95" r="3" fill="${glowColor}" opacity="0.9" />
+      <line x1="268" y1="110" x2="288" y2="110" stroke="#374151" stroke-width="1.5" />
+      <line x1="268" y1="116" x2="288" y2="116" stroke="#374151" stroke-width="1.5" />
+    </svg>
+  `;
+}
+
+function svgLabIllustration(labName = "") {
+  const isCyber = /cyber|security/i.test(labName);
+  const isProg = /program|code|dev/i.test(labName);
+  const isAi = /ai|ml|intelligence|data/i.test(labName);
+  const accent = isCyber ? "#10B981" : isAi ? "#8B5CF6" : isProg ? "#0284C7" : "#F59E0B";
+  const safeName = (labName || "lab").replace(/[^a-zA-Z0-9]/g, "-");
+
+  return `
+    <svg class="airbnb-lab-illustration" viewBox="0 0 320 180" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="labgrad-${safeName}" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#1E293B" />
+          <stop offset="100%" stop-color="#0F172A" />
+        </linearGradient>
+      </defs>
+      <rect width="320" height="180" fill="url(#labgrad-${safeName})" />
+      
+      <!-- Floor -->
+      <polygon points="0,110 320,110 320,180 0,180" fill="#182234" opacity="0.9" />
+      <line x1="0" y1="110" x2="320" y2="110" stroke="#334155" stroke-width="2" />
+      
+      <!-- Server Rack -->
+      <rect x="25" y="30" width="36" height="85" rx="3" fill="#0B0F19" stroke="#334155" stroke-width="1.5" />
+      <line x1="30" y1="42" x2="56" y2="42" stroke="${accent}" stroke-width="2" opacity="0.8" />
+      <line x1="30" y1="52" x2="56" y2="52" stroke="#38BDF8" stroke-width="2" opacity="0.7" />
+      <line x1="30" y1="62" x2="56" y2="62" stroke="#94A3B8" stroke-width="1.5" opacity="0.6" />
+      <line x1="30" y1="72" x2="56" y2="72" stroke="${accent}" stroke-width="2" opacity="0.8" />
+      <circle cx="34" cy="85" r="2" fill="${accent}" />
+      <circle cx="42" cy="85" r="2" fill="#38BDF8" />
+      <circle cx="50" cy="85" r="2" fill="#F59E0B" />
+
+      <!-- Row of Computer Workstations -->
+      <rect x="85" y="65" width="45" height="30" rx="3" fill="#0F172A" stroke="#38BDF8" stroke-width="1.5" />
+      <rect x="88" y="68" width="39" height="24" rx="2" fill="#1E293B" />
+      <line x1="92" y1="76" x2="115" y2="76" stroke="${accent}" stroke-width="1.5" />
+      <polygon points="80,115 140,115 145,135 75,135" fill="#243042" />
+
+      <rect x="160" y="60" width="55" height="36" rx="3" fill="#0F172A" stroke="${accent}" stroke-width="1.8" />
+      <rect x="164" y="64" width="47" height="28" rx="2" fill="#1E293B" />
+      <line x1="170" y1="74" x2="200" y2="74" stroke="${accent}" stroke-width="2" />
+      <line x1="170" y1="80" x2="195" y2="80" stroke="#38BDF8" stroke-width="1.5" />
+      <polygon points="150,115 225,115 235,140 140,140" fill="#243042" />
+
+      <rect x="245" y="65" width="45" height="30" rx="3" fill="#0F172A" stroke="#818CF8" stroke-width="1.5" />
+      <rect x="248" y="68" width="39" height="24" rx="2" fill="#1E293B" />
+      <line x1="252" y1="76" x2="278" y2="76" stroke="#818CF8" stroke-width="1.5" />
+      <polygon points="235,115 295,115 305,135 225,135" fill="#243042" />
+
+      <!-- Ceiling Light Tracks -->
+      <line x1="70" y1="10" x2="270" y2="10" stroke="#E2E8F0" stroke-width="3" opacity="0.3" stroke-linecap="round" />
+      <line x1="100" y1="20" x2="240" y2="20" stroke="${accent}" stroke-width="1" opacity="0.4" />
+    </svg>
+  `;
+}
+
+function renderDonutChart(counts, total) {
+  if (!total) {
+    return `<div class="donut-chart-container" style="display:flex;align-items:center;justify-content:center;"><span style="color:var(--muted);font-size:0.8rem;">No workstations</span></div>`;
+  }
+  const radius = 68;
+  const circumference = 2 * Math.PI * radius;
+  const segments = [
+    { key: "Available", count: counts.Available || 0, color: "var(--color-available)" },
+    { key: "In use", count: counts["In use"] || 0, color: "var(--color-occupied)" },
+    { key: "Idle", count: counts.Idle || 0, color: "var(--color-idle)" },
+    { key: "Offline", count: counts.Offline || 0, color: "var(--color-offline)" },
+    { key: "Maintenance", count: counts.Maintenance || 0, color: "var(--color-maintenance)" },
+    { key: "Unknown", count: counts.Unknown || 0, color: "var(--color-unknown)" }
+  ];
+
+  let cumulative = 0;
+  const circles = segments.map((seg) => {
+    if (!seg.count) return "";
+    const pct = seg.count / total;
+    const dash = pct * circumference;
+    const offset = circumference - cumulative;
+    cumulative += dash;
+    return `<circle cx="90" cy="90" r="${radius}" fill="none" stroke="${seg.color}" stroke-width="20"
+      stroke-dasharray="${dash} ${circumference - dash}" stroke-dashoffset="${offset}"
+      class="donut-segment" data-action="donut-status" data-status="${seg.key}" title="${seg.key}: ${seg.count}" />`;
+  }).join("");
+
+  const availPct = Math.round(((counts.Available || 0) / total) * 100);
+
+  return `
+    <div class="donut-chart-container">
+      <svg viewBox="0 0 180 180" class="donut-chart-svg">
+        <circle cx="90" cy="90" r="${radius}" fill="none" stroke="var(--border)" stroke-width="20" opacity="0.3" />
+        ${circles}
+      </svg>
+      <div class="donut-center">
+        <span class="donut-percentage">${availPct}%</span>
+        <span class="donut-label">Ready</span>
+      </div>
+    </div>`;
+}
+
+const discoveryCategoriesList = [
+  { name: "All Workstations", icon: "Grid" },
+  { name: "Available Now", icon: "CheckCircle" },
+  { name: "Programming", icon: "Code" },
+  { name: "Cybersecurity", icon: "ShieldCheck" },
+  { name: "Database", icon: "DatabaseIcon" },
+  { name: "AI & Machine Learning", icon: "Sparkles" },
+  { name: "Web Development", icon: "Cpu" },
+  { name: "Design Tools", icon: "Palette" },
+  { name: "Networking", icon: "NetworkIcon" }
+];
+
+/* ---------------- 1. DASHBOARD – AIRBNB EXPLORE EXPERIENCE ---------------- */
+function renderStudentDashboard(workstations, labs, softwareList) {
+  const total = workstations.length;
+  const availableCount = workstations.filter((w) => w.status === "Available").length;
+  const inUseCount = workstations.filter((w) => w.status === "In use").length;
+  const idleCount = workstations.filter((w) => w.status === "Idle").length;
+  const offlineCount = workstations.filter((w) => w.status === "Offline").length;
+
+  const currentHour = new Date().getHours();
+  const greeting = currentHour < 12 ? "Good morning" : currentHour < 17 ? "Good afternoon" : "Good evening";
+  const studentName = state.user?.name ? state.user.name.split(" ")[0] : "Student";
+  const todayFormatted = new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+
+  // Popular software detection count across campus
+  const softwareMap = new Map();
+  for (const ws of workstations) {
+    const seenOnWs = new Set();
+    for (const item of ws.software || []) {
+      if (!item.name || seenOnWs.has(item.name)) continue;
+      seenOnWs.add(item.name);
+      softwareMap.set(item.name, (softwareMap.get(item.name) || 0) + 1);
+    }
+  }
+  const topSoftware = [...softwareMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8);
+
+  // Filter workstations by active Airbnb category
+  const activeCategory = state.activeCategory || "All Workstations";
+  const categoryWorkstations = workstations.filter((w) => matchesCategory(w, activeCategory));
+
+  // Autocomplete suggestions for capsule search
+  const popularSuggestions = ["Python", "Java", "MongoDB", "Visual Studio Code", "Wireshark", "Docker", "Git", "Node.js", "C++", "PostgreSQL"];
+
+  // Recently reported workstations
+  const recentlyActive = [...workstations]
+    .sort((a, b) => Date.parse(b.lastHeartbeat || b.lastInventoryScan || 0) - Date.parse(a.lastHeartbeat || a.lastInventoryScan || 0))
+    .slice(0, 5);
+
+  return `
+    <div class="airbnb-explore-container">
+      <!-- A. Welcome Header -->
+      <section class="airbnb-welcome-hero">
+        <div class="welcome-hero-text">
+          <div class="welcome-greeting-badge">
+            <span class="live-pulse-dot"></span>
+            <span>${escapeHtml(greeting)}, ${escapeHtml(studentName)} · ${escapeHtml(todayFormatted)}</span>
+          </div>
+          <h1 class="welcome-hero-title">Discover Your Next Workstation</h1>
+          <p class="welcome-hero-subtitle">Find the right computer, software, and laboratory before you visit.</p>
+        </div>
+        <div class="welcome-hero-badges">
+          <span class="hero-chip">${icon("Profile")} USN: ${escapeHtml(state.user?.identifier || "Registered")}</span>
+          <span class="hero-chip">${icon("Laboratories")} Dept: ${escapeHtml(state.user?.department || "General")}</span>
+          <span class="hero-chip api-status-chip">
+            <span class="status-indicator-dot"></span>
+            ${state.apiLatency || 12}ms API Telemetry
+          </span>
+        </div>
+      </section>
+
+      <!-- B. Floating Search Capsule (Airbnb 3-Segment Style) -->
+      <section class="search-capsule-wrapper">
+        <form id="airbnb-search-form" class="floating-search-capsule" role="search">
+          <!-- 1. Find Software -->
+          <div class="capsule-segment" data-segment="software">
+            <label for="capsule-software" class="capsule-label">Find Software</label>
+            <input id="capsule-software" name="software" type="search" class="capsule-input" 
+                   placeholder="Python, Java, MongoDB, VS Code..." 
+                   value="${escapeHtml(state.search)}" list="capsule-software-datalist" autocomplete="off" />
+            <datalist id="capsule-software-datalist">
+              ${popularSuggestions.map((s) => `<option value="${escapeHtml(s)}"></option>`).join("")}
+            </datalist>
+          </div>
+
+          <div class="capsule-divider"></div>
+
+          <!-- 2. Choose Laboratory -->
+          <div class="capsule-segment" data-segment="lab">
+            <label for="capsule-lab" class="capsule-label">Choose Laboratory</label>
+            <select id="capsule-lab" name="lab" class="capsule-select">
+              <option value="">All laboratories</option>
+              ${labs.map((l) => `<option value="${escapeHtml(l.name)}" ${state.lab === l.name ? "selected" : ""}>${escapeHtml(l.name)}</option>`).join("")}
+            </select>
+          </div>
+
+          <div class="capsule-divider"></div>
+
+          <!-- 3. Workstation Availability -->
+          <div class="capsule-segment" data-segment="status">
+            <label for="capsule-status" class="capsule-label">Availability</label>
+            <select id="capsule-status" name="availability" class="capsule-select">
+              <option value="">All workstations</option>
+              <option value="Available" ${state.availability === "Available" ? "selected" : ""}>Available</option>
+              <option value="In use" ${state.availability === "In use" ? "selected" : ""}>Occupied / In Use</option>
+              <option value="Offline" ${state.availability === "Offline" ? "selected" : ""}>Offline</option>
+            </select>
+          </div>
+
+          <!-- Search Action Button -->
+          <button type="submit" class="capsule-search-btn" aria-label="Search workstations">
+            ${icon("Search")}
+            <span class="capsule-btn-text">Search</span>
+          </button>
+        </form>
+      </section>
+
+      <!-- C. Horizontal Discovery Categories -->
+      <section class="airbnb-categories-bar">
+        <div class="categories-scroll-track" id="categories-track">
+          ${discoveryCategoriesList.map((cat) => `
+            <button type="button" class="category-item-btn ${activeCategory === cat.name ? "active" : ""}" 
+                    data-action="select-category" data-category="${escapeHtml(cat.name)}">
+              <span class="category-icon-wrap">${icon(cat.icon)}</span>
+              <span class="category-title">${escapeHtml(cat.name)}</span>
+            </button>
+          `).join("")}
+        </div>
+      </section>
+
+      <!-- D. Workstation Discovery Cards (Airbnb Listing Pattern) -->
+      <section class="airbnb-listings-section">
+        <div class="section-title-row">
+          <div>
+            <h2 class="airbnb-section-title">${escapeHtml(activeCategory)}</h2>
+            <p class="airbnb-section-subtitle">Showing ${categoryWorkstations.length} workstation${categoryWorkstations.length === 1 ? "" : "s"} ready for academic coursework</p>
+          </div>
+          <button type="button" class="airbnb-view-all-link" data-action="quick-nav" data-target="Find a Workstation">
+            View all workstations ${icon("ArrowRight")}
+          </button>
+        </div>
+
+        ${categoryWorkstations.length ? `
+          <div class="airbnb-listings-grid">
+            ${categoryWorkstations.slice(0, 8).map((w) => {
+              const isFavorited = state.favorites.has(w.id);
+              const softList = w.software || [];
+              const topSoft = softList.slice(0, 3);
+              const remainingCount = softList.length - 3;
+              return `
+                <article class="airbnb-listing-card">
+                  <!-- Visual Cover Area with Dynamic Workstation Illustration -->
+                  <div class="listing-visual-wrap" data-action="open-workstation" data-id="${escapeHtml(w.id)}" role="button" tabindex="0" aria-label="View workstation ${escapeHtml(w.id)}">
+                    ${svgWorkstationIllustration(w)}
+                    <div class="listing-badge-overlay">
+                      <span class="listing-status-badge ${statusClass(w.status)}">
+                        <span class="status-pulse-dot"></span>
+                        ${escapeHtml(w.status)}
+                      </span>
+                    </div>
+                    <button type="button" class="listing-favorite-btn ${isFavorited ? "active" : ""}" 
+                            data-action="toggle-favorite" data-id="${escapeHtml(w.id)}" 
+                            aria-label="${isFavorited ? "Remove from saved" : "Save workstation"}">
+                      ${icon(isFavorited ? "HeartFilled" : "Heart")}
+                    </button>
+                  </div>
+
+                  <!-- Clean Card Content -->
+                  <div class="listing-content">
+                    <div class="listing-header-row">
+                      <div class="listing-title-group" data-action="open-workstation" data-id="${escapeHtml(w.id)}">
+                        <h3 class="listing-title">${escapeHtml(w.id)}</h3>
+                        <span class="listing-hostname">${escapeHtml(w.hostname || "Workstation")}</span>
+                      </div>
+                      <span class="listing-os-pill">${escapeHtml(w.os ? w.os.split(" ")[0] : "OS")}</span>
+                    </div>
+
+                    <p class="listing-location">
+                      ${icon("Laboratories")}
+                      <span>${escapeHtml(w.lab)} · ${escapeHtml(w.room || "Room not reported")}</span>
+                    </p>
+
+                    <!-- Important Installed Software Chips -->
+                    <div class="listing-software-chips">
+                      ${topSoft.length ? topSoft.map((s) => `
+                        <span class="listing-soft-chip">${escapeHtml(s.name)}</span>
+                      `).join("") : '<span class="listing-soft-chip muted">Standard OS</span>'}
+                      ${remainingCount > 0 ? `<span class="listing-soft-chip more">+${remainingCount} more</span>` : ""}
+                    </div>
+
+                    <!-- Card Footer: Live Telemetry & Relative Reported Time -->
+                    <div class="listing-footer-row">
+                      <div class="listing-telemetry">
+                        <span>RAM: ${formatBytes(w.memoryTotalBytes)}</span>
+                        <span>· CPU: ${w.health?.cpuPercent == null ? "N/A" : `${w.health.cpuPercent}%`}</span>
+                      </div>
+                      <span class="listing-time">${escapeHtml(timeAgo(w.lastHeartbeat || w.lastInventoryScan))}</span>
+                    </div>
+
+                    <button type="button" class="listing-action-btn" data-action="open-workstation" data-id="${escapeHtml(w.id)}">
+                      View Details ${icon("ArrowRight")}
+                    </button>
+                  </div>
+                </article>
+              `;
+            }).join("")}
+          </div>
+        ` : emptyPanel(`No workstations found under "${escapeHtml(activeCategory)}". Try selecting another category or view all.`)}
+      </section>
+
+      <!-- E. Live Availability Overview -->
+      <section class="airbnb-availability-overview">
+        <div class="availability-card-interactive" data-action="quick-nav" data-target="Find a Workstation">
+          <div class="avail-card-header">
+            <span class="avail-label">Total Workstations</span>
+            ${icon("Server")}
+          </div>
+          <div class="avail-number">${total}</div>
+          <span class="avail-footer">Across ${labs.length} laboratories</span>
+        </div>
+
+        <div class="availability-card-interactive highlight-available" data-action="quick-nav" data-target="Find a Workstation" data-filter="Available">
+          <div class="avail-card-header">
+            <span class="avail-label">Available Now</span>
+            ${icon("CheckCircle")}
+          </div>
+          <div class="avail-number text-available">${availableCount}</div>
+          <span class="avail-footer">${total ? Math.round((availableCount / total) * 100) : 0}% of fleet ready</span>
+        </div>
+
+        <div class="availability-card-interactive highlight-occupied" data-action="quick-nav" data-target="Find a Workstation" data-filter="In use">
+          <div class="avail-card-header">
+            <span class="avail-label">Occupied / In Use</span>
+            ${icon("UserCheck")}
+          </div>
+          <div class="avail-number text-occupied">${inUseCount}</div>
+          <span class="avail-footer">Active student sessions</span>
+        </div>
+
+        <div class="availability-card-interactive highlight-offline" data-action="quick-nav" data-target="Find a Workstation" data-filter="Offline">
+          <div class="avail-card-header">
+            <span class="avail-label">Offline / Standby</span>
+            ${icon("PowerOff")}
+          </div>
+          <div class="avail-number text-offline">${offlineCount + idleCount}</div>
+          <span class="avail-footer">${offlineCount} offline, ${idleCount} idle</span>
+        </div>
+      </section>
+
+      <!-- F. Explore Laboratories (Airbnb Destinations Layout) -->
+      <section class="airbnb-destinations-section">
+        <div class="section-title-row">
+          <div>
+            <h2 class="airbnb-section-title">Explore Laboratories</h2>
+            <p class="airbnb-section-subtitle">Browse campus computing facilities, room numbers, and available hardware</p>
+          </div>
+          <button type="button" class="airbnb-view-all-link" data-action="quick-nav" data-target="Laboratories">
+            All laboratories ${icon("ArrowRight")}
+          </button>
+        </div>
+
+        ${labs.length ? `
+          <div class="airbnb-destinations-grid">
+            ${labs.slice(0, 4).map((lab) => {
+              const labStations = workstations.filter((w) => w.lab === lab.name);
+              const labAvail = labStations.filter((w) => w.status === "Available").length;
+              const pct = labStations.length ? Math.round((labAvail / labStations.length) * 100) : 0;
+              return `
+                <article class="airbnb-destination-card" data-action="select-lab" data-lab="${escapeHtml(lab.name)}">
+                  <div class="destination-visual-wrap">
+                    ${svgLabIllustration(lab.name)}
+                    <span class="destination-room-pill">${escapeHtml(lab.room || "Lab Facility")}</span>
+                  </div>
+                  <div class="destination-info">
+                    <h3 class="destination-name">${escapeHtml(lab.name)}</h3>
+                    <div class="destination-meta-row">
+                      <span><strong>${labStations.length}</strong> computers</span>
+                      <span>·</span>
+                      <span class="text-available"><strong>${labAvail}</strong> ready (${pct}%)</span>
+                    </div>
+                    <div class="destination-capacity-bar">
+                      <div class="destination-capacity-fill" style="width: ${pct}%;"></div>
+                    </div>
+                    <button type="button" class="destination-explore-btn" data-action="select-lab" data-lab="${escapeHtml(lab.name)}">
+                      Explore Lab Inventory ${icon("ArrowRight")}
+                    </button>
+                  </div>
+                </article>
+              `;
+            }).join("")}
+          </div>
+        ` : emptyPanel("No laboratories registered in the system yet.")}
+      </section>
+
+      <!-- G. Popular Software Across Campus -->
+      <section class="airbnb-software-section">
+        <div class="section-title-row">
+          <div>
+            <h2 class="airbnb-section-title">Explore Software Across Your Campus</h2>
+            <p class="airbnb-section-subtitle">Click any detected developer environment or package to find computers equipped with it</p>
+          </div>
+          <button type="button" class="airbnb-view-all-link" data-action="quick-nav" data-target="Find a Workstation" data-focus="software">
+            Search all tools ${icon("ArrowRight")}
+          </button>
+        </div>
+
+        ${topSoftware.length ? `
+          <div class="airbnb-software-grid">
+            ${topSoftware.map(([name, count]) => `
+              <button type="button" class="airbnb-software-card" data-action="select-software" data-software="${escapeHtml(name)}">
+                <div class="software-card-top">
+                  <span class="software-card-name">${escapeHtml(name)}</span>
+                  <span class="software-cat-chip">${categorizeSoftware(name)}</span>
+                </div>
+                <div class="software-card-bottom">
+                  <span class="software-count-text"><strong>${count}</strong> computer${count === 1 ? "" : "s"} detected</span>
+                  <span class="software-card-arrow">${icon("ArrowRight")}</span>
+                </div>
+              </button>
+            `).join("")}
+          </div>
+        ` : emptyPanel("No software reported by workstation monitoring agents yet.")}
+      </section>
+
+      <!-- H. Recently Reported Workstations -->
+      <section class="airbnb-recent-section">
+        <div class="section-title-row">
+          <div>
+            <h2 class="airbnb-section-title">Recently Reporting Workstations</h2>
+            <p class="airbnb-section-subtitle">Live heartbeat and telemetry signals received from authorized lab computers</p>
+          </div>
+          <button type="button" class="airbnb-view-all-link" data-action="quick-nav" data-target="Find a Workstation">
+            View full inventory ${icon("ArrowRight")}
+          </button>
+        </div>
+
+        ${recentlyActive.length ? `
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Workstation</th>
+                  <th>Laboratory</th>
+                  <th>Status</th>
+                  <th>Last Reported</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${recentlyActive.map((w) => `
+                  <tr>
+                    <td>
+                      <strong>${escapeHtml(w.id)}</strong>
+                      <span class="table-room">${escapeHtml(w.hostname || "Workstation")}</span>
+                    </td>
+                    <td>
+                      ${escapeHtml(w.lab)}
+                      <span class="table-room">${escapeHtml(w.room || "Room")}</span>
+                    </td>
+                    <td>${badge(w.status)}</td>
+                    <td>${escapeHtml(timeAgo(w.lastHeartbeat || w.lastInventoryScan))}</td>
+                    <td>
+                      <button type="button" class="secondary-button compact-button" data-action="open-workstation" data-id="${escapeHtml(w.id)}">Details</button>
+                    </td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        ` : emptyPanel("No active workstation telemetry reported yet.")}
+      </section>
+    </div>
+  `;
+}
+
+/* ---------------- 2. FIND A WORKSTATION PAGE ---------------- */
+function renderFindWorkstationPage(workstations, labs, softwareList) {
+  const osList = [...new Set(workstations.map((w) => w.os).filter(Boolean))];
+  const query = state.search.trim().toLowerCase();
+
+  // Filter workstations
+  let filtered = workstations.filter((w) => {
+    const matchesLab = !state.lab || w.lab === state.lab;
+    const matchesOs = !state.os || w.os === state.os;
+    const matchesAvail = !state.availability || w.status === state.availability;
+    let matchesQuery = true;
+    if (query) {
+      const idMatch = w.id.toLowerCase().includes(query);
+      const hostMatch = (w.hostname || "").toLowerCase().includes(query);
+      const roomMatch = (w.room || "").toLowerCase().includes(query);
+      const softMatch = (w.software || []).some((s) => `${s.name} ${s.version} ${s.publisher}`.toLowerCase().includes(query));
+      matchesQuery = idMatch || hostMatch || roomMatch || softMatch;
+    }
+    return matchesLab && matchesOs && matchesAvail && matchesQuery;
+  });
+
+  // Sort workstations
+  const sortBy = state.sortBy || "id-asc";
+  filtered.sort((a, b) => {
+    if (sortBy === "id-desc") return b.id.localeCompare(a.id);
+    if (sortBy === "status") {
+      const order = { Available: 1, "In use": 2, Idle: 3, Maintenance: 4, Offline: 5, Unknown: 6 };
+      return (order[a.status] || 99) - (order[b.status] || 99);
+    }
+    if (sortBy === "recent") {
+      return Date.parse(b.lastHeartbeat || b.lastInventoryScan || 0) - Date.parse(a.lastHeartbeat || a.lastInventoryScan || 0);
+    }
+    if (sortBy === "cpu") {
+      return (a.health?.cpuPercent ?? 100) - (b.health?.cpuPercent ?? 100);
+    }
+    return a.id.localeCompare(b.id);
+  });
+
+  const page = pageItems(filtered, "workstations", 12);
+  const availableCount = filtered.filter((w) => w.status === "Available").length;
+  const inUseCount = filtered.filter((w) => w.status === "In use").length;
+  const offlineCount = filtered.filter((w) => w.status === "Offline").length;
+
+  return `
+    <div class="find-workstation-view">
+      <!-- Search & Filters Panel (Airbnb Search Page Pattern) -->
+      <section class="find-filter-panel">
+        <form id="student-search-form">
+          <div class="filter-controls-row">
+            <label class="field" style="margin:0;">
+              <span>Search Computer or Software</span>
+              <div class="input-shell">
+                ${icon("Search")}
+                <input name="software" type="search" value="${escapeHtml(state.search)}" placeholder="Search ID, hostname, Python, MongoDB, VS Code..." aria-label="Search computer or software" />
+              </div>
+            </label>
+
+            <label class="field" style="margin:0;">
+              <span>Laboratory</span>
+              <select name="lab">
+                <option value="">All Laboratories</option>
+                ${labs.map((l) => `<option value="${escapeHtml(l.name)}" ${l.name === state.lab ? "selected" : ""}>${escapeHtml(l.name)}</option>`).join("")}
+              </select>
+            </label>
+
+            <label class="field" style="margin:0;">
+              <span>Operating System</span>
+              <select name="os">
+                <option value="">All Operating Systems</option>
+                ${osList.map((os) => `<option value="${escapeHtml(os)}" ${os === state.os ? "selected" : ""}>${escapeHtml(os)}</option>`).join("")}
+              </select>
+            </label>
+
+            <label class="field" style="margin:0;">
+              <span>Status</span>
+              <select name="availability">
+                <option value="">All Statuses</option>
+                ${["Available", "In use", "Idle", "Offline", "Maintenance", "Unknown"].map((s) => `<option value="${s}" ${state.availability === s ? "selected" : ""}>${s}</option>`).join("")}
+              </select>
+            </label>
+
+            <label class="field" style="margin:0;">
+              <span>Sort By</span>
+              <select name="sortBy">
+                <option value="id-asc" ${sortBy === "id-asc" ? "selected" : ""}>ID (A to Z)</option>
+                <option value="id-desc" ${sortBy === "id-desc" ? "selected" : ""}>ID (Z to A)</option>
+                <option value="status" ${sortBy === "status" ? "selected" : ""}>Available First</option>
+                <option value="recent" ${sortBy === "recent" ? "selected" : ""}>Most Recently Active</option>
+                <option value="cpu" ${sortBy === "cpu" ? "selected" : ""}>Lowest CPU Usage</option>
+              </select>
+            </label>
+
+            <div style="display:flex; gap:8px;">
+              <button type="submit" class="primary-button" style="white-space:nowrap;">Search</button>
+              <button type="button" class="secondary-button" data-action="clear-student-filters">Reset</button>
+            </div>
+          </div>
+        </form>
+
+        <!-- Active Filter Pills & View Toggles -->
+        <div class="filter-pills-bar">
+          <span style="font-size:0.75rem; color:var(--muted); font-weight:600;">Active Filters:</span>
+          ${!state.search && !state.lab && !state.os && !state.availability ? '<span style="font-size:0.75rem; color:var(--muted);">None (Showing all workstations)</span>' : ""}
+          ${state.search ? `
+            <span class="filter-chip-removable">
+              Search: "<strong>${escapeHtml(state.search)}</strong>"
+              <button type="button" class="filter-chip-remove-btn" data-action="clear-filter-chip" data-filter-type="search" aria-label="Remove search filter">✕</button>
+            </span>
+          ` : ""}
+          ${state.lab ? `
+            <span class="filter-chip-removable">
+              Lab: <strong>${escapeHtml(state.lab)}</strong>
+              <button type="button" class="filter-chip-remove-btn" data-action="clear-filter-chip" data-filter-type="lab" aria-label="Remove lab filter">✕</button>
+            </span>
+          ` : ""}
+          ${state.os ? `
+            <span class="filter-chip-removable">
+              OS: <strong>${escapeHtml(state.os)}</strong>
+              <button type="button" class="filter-chip-remove-btn" data-action="clear-filter-chip" data-filter-type="os" aria-label="Remove OS filter">✕</button>
+            </span>
+          ` : ""}
+          ${state.availability ? `
+            <span class="filter-chip-removable">
+              Status: <strong>${escapeHtml(state.availability)}</strong>
+              <button type="button" class="filter-chip-remove-btn" data-action="clear-filter-chip" data-filter-type="availability" aria-label="Remove status filter">✕</button>
+            </span>
+          ` : ""}
+
+          <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
+            <span style="font-size:0.78rem; color:var(--muted);">Showing ${filtered.length} computer${filtered.length === 1 ? "" : "s"}</span>
+            <div class="view-toggle-wrap">
+              <button type="button" class="view-toggle-btn ${state.viewMode === "grid" ? "active" : ""}" data-action="set-view-mode" data-mode="grid" aria-label="Grid view">${icon("Grid")}<span>Cards</span></button>
+              <button type="button" class="view-toggle-btn ${state.viewMode === "table" ? "active" : ""}" data-action="set-view-mode" data-mode="table" aria-label="Table view">${icon("List")}<span>Table</span></button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Workstations Presentation -->
+      ${filtered.length ? `
+        ${page.controls}
+        ${state.viewMode === "grid" ? `
+          <div class="airbnb-listings-grid">
+            ${page.items.map((w) => {
+              const isFavorited = state.favorites.has(w.id);
+              const softList = w.software || [];
+              const topSoft = softList.slice(0, 3);
+              const remainingCount = softList.length - 3;
+              return `
+                <article class="airbnb-listing-card">
+                  <!-- Visual Cover Area -->
+                  <div class="listing-visual-wrap" data-action="open-workstation" data-id="${escapeHtml(w.id)}" role="button" tabindex="0">
+                    ${svgWorkstationIllustration(w)}
+                    <div class="listing-badge-overlay">
+                      <span class="listing-status-badge ${statusClass(w.status)}">
+                        <span class="status-pulse-dot"></span>
+                        ${escapeHtml(w.status)}
+                      </span>
+                    </div>
+                    <button type="button" class="listing-favorite-btn ${isFavorited ? "active" : ""}" 
+                            data-action="toggle-favorite" data-id="${escapeHtml(w.id)}" 
+                            aria-label="${isFavorited ? "Remove from saved" : "Save workstation"}">
+                      ${icon(isFavorited ? "HeartFilled" : "Heart")}
+                    </button>
+                  </div>
+
+                  <!-- Content -->
+                  <div class="listing-content">
+                    <div class="listing-header-row">
+                      <div class="listing-title-group" data-action="open-workstation" data-id="${escapeHtml(w.id)}">
+                        <h3 class="listing-title">${escapeHtml(w.id)}</h3>
+                        <span class="listing-hostname">${escapeHtml(w.hostname || "Workstation")}</span>
+                      </div>
+                      <span class="listing-os-pill">${escapeHtml(w.os ? w.os.split(" ")[0] : "OS")}</span>
+                    </div>
+
+                    <p class="listing-location">
+                      ${icon("Laboratories")}
+                      <span>${escapeHtml(w.lab)} · ${escapeHtml(w.room || "Room not reported")}</span>
+                    </p>
+
+                    <!-- Important Installed Software Chips -->
+                    <div class="listing-software-chips">
+                      ${topSoft.length ? topSoft.map((s) => `
+                        <span class="listing-soft-chip">${escapeHtml(s.name)}</span>
+                      `).join("") : '<span class="listing-soft-chip muted">Standard OS</span>'}
+                      ${remainingCount > 0 ? `<span class="listing-soft-chip more">+${remainingCount} more</span>` : ""}
+                    </div>
+
+                    <!-- Live Telemetry & Relative Time -->
+                    <div class="listing-footer-row">
+                      <div class="listing-telemetry">
+                        <span>RAM: ${formatBytes(w.memoryTotalBytes)}</span>
+                        <span>· CPU: ${w.health?.cpuPercent == null ? "N/A" : `${w.health.cpuPercent}%`}</span>
+                      </div>
+                      <span class="listing-time">${escapeHtml(timeAgo(w.lastHeartbeat || w.lastInventoryScan))}</span>
+                    </div>
+
+                    <button type="button" class="listing-action-btn" data-action="open-workstation" data-id="${escapeHtml(w.id)}">
+                      View System Details ${icon("ArrowRight")}
+                    </button>
+                  </div>
+                </article>
+              `;
+            }).join("")}
+          </div>
+        ` : `
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Workstation</th>
+                  <th>Laboratory</th>
+                  <th>Status</th>
+                  <th>OS & CPU</th>
+                  <th>RAM / Disk</th>
+                  <th>Health</th>
+                  <th>Software</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${page.items.map((w) => `
+                  <tr>
+                    <td>
+                      <button type="button" class="table-link" data-action="open-workstation" data-id="${escapeHtml(w.id)}">${escapeHtml(w.id)}</button>
+                      <span class="table-room">${escapeHtml(w.hostname || "Workstation")}</span>
+                    </td>
+                    <td>
+                      ${escapeHtml(w.lab)}
+                      <span class="table-room">${escapeHtml(w.room || "Room not reported")}</span>
+                    </td>
+                    <td>${badge(w.status)}</td>
+                    <td>
+                      <div>${escapeHtml(w.os || "Not reported")}</div>
+                      <span class="table-room" style="max-width:180px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(w.cpu || "Not reported")}</span>
+                    </td>
+                    <td>
+                      <div>${formatBytes(w.memoryTotalBytes)}</div>
+                      <span class="table-room">${formatBytes(w.diskTotalBytes)}</span>
+                    </td>
+                    <td>
+                      <span style="font-size:0.75rem;">CPU: ${w.health?.cpuPercent == null ? "N/A" : `${w.health.cpuPercent}%`}</span>
+                    </td>
+                    <td>
+                      <span class="chip soft">${w.software?.length || 0} packages</span>
+                    </td>
+                    <td>
+                      <button type="button" class="secondary-button compact-button" data-action="open-workstation" data-id="${escapeHtml(w.id)}">Details</button>
+                    </td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        `}
+      ` : emptyPanel("No workstations match your search or filter criteria. Try clearing filters.")}
+    </div>
+  `;
+}
+
+/* ---------------- 3. LABORATORIES EXPLORATION PAGE ---------------- */
+function renderLaboratoriesPage(workstations, labs, softwareList) {
+  // If user selected a specific lab to inspect:
+  if (state.selectedLabName) {
+    const labName = state.selectedLabName;
+    const lab = labs.find((l) => l.name === labName) || { name: labName, room: "Assigned Lab" };
+    const labStations = workstations.filter((w) => w.lab === labName);
+    const availableCount = labStations.filter((w) => w.status === "Available").length;
+    const inUseCount = labStations.filter((w) => w.status === "In use").length;
+    const offlineCount = labStations.filter((w) => w.status === "Offline").length;
+    const pct = labStations.length ? Math.round((availableCount / labStations.length) * 100) : 0;
+    const osList = [...new Set(labStations.map((w) => w.os).filter(Boolean))];
+
+    // Collect software detected across this lab
+    const labSoftware = new Map();
+    for (const ws of labStations) {
+      for (const item of ws.software || []) {
+        if (!item.name) continue;
+        labSoftware.set(item.name, (labSoftware.get(item.name) || 0) + 1);
+      }
+    }
+    const topLabSoftware = [...labSoftware.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+
+    return `
+      <div class="lab-detail-view">
+        <button type="button" class="lab-breadcrumb-btn" data-action="back-to-labs">
+          ${icon("ArrowRight")} Back to All Laboratories
+        </button>
+
+        <section class="lab-detail-hero">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
+            <div>
+              <p class="eyebrow">Laboratory Facility Details</p>
+              <h2 style="font-size:1.8rem; margin:4px 0 6px 0;">${escapeHtml(lab.name)}</h2>
+              <p style="color:var(--muted); font-size:0.9rem;">Room: <strong>${escapeHtml(lab.room || "Room not reported")}</strong> · Registered Campus Computer Laboratory</p>
+            </div>
+            ${badge(availableCount > 0 ? "Available" : labStations.length === 0 ? "Unknown" : "In use")}
+          </div>
+
+          <div class="lab-detail-stats-grid">
+            <div class="metric-box light"><span>Total Workstations</span><strong>${labStations.length}</strong></div>
+            <div class="metric-box light"><span>Available Now</span><strong style="color:var(--color-available);">${availableCount}</strong></div>
+            <div class="metric-box light"><span>In Use</span><strong style="color:var(--color-occupied);">${inUseCount}</strong></div>
+            <div class="metric-box light"><span>Offline</span><strong style="color:var(--color-offline);">${offlineCount}</strong></div>
+          </div>
+
+          <!-- Capacity Track -->
+          <div class="lab-capacity-bar-wrap" style="margin-top:16px;">
+            <div class="lab-capacity-label">
+              <span>Facility Capacity Readiness</span>
+              <strong>${availableCount} of ${labStations.length} Ready (${pct}%)</strong>
+            </div>
+            <div class="lab-capacity-track">
+              <div class="lab-capacity-fill" style="width: ${pct}%;"></div>
+            </div>
+          </div>
+
+          ${osList.length ? `
+            <div style="margin-top:14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+              <span style="font-size:0.75rem; color:var(--muted); font-weight:600;">Operating Systems:</span>
+              ${osList.map((os) => `<span class="chip soft">${escapeHtml(os)}</span>`).join("")}
+            </div>
+          ` : ""}
+        </section>
+
+        <!-- Top Software in this Lab -->
+        <section class="panel" style="margin-bottom:20px;">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Laboratory Inventory</p>
+              <h3>Top Detected Software in ${escapeHtml(lab.name)}</h3>
+            </div>
+            <span class="demo-tag">${labSoftware.size} Packages</span>
+          </div>
+          ${topLabSoftware.length ? `
+            <div class="software-catalog-grid">
+              ${topLabSoftware.map(([name, count]) => `
+                <div class="software-catalog-tag">
+                  <span class="software-tag-name">${escapeHtml(name)}</span>
+                  <span class="software-count-chip">${count} ${count === 1 ? "PC" : "PCs"}</span>
+                  <span class="software-cat-badge">${categorizeSoftware(name)}</span>
+                </div>
+              `).join("")}
+            </div>
+          ` : emptyPanel("No software scans reported for this laboratory yet.")}
+        </section>
+
+        <!-- Workstations Assigned to this Lab -->
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Hardware Allocation</p>
+              <h3>Workstations Assigned to this Facility (${labStations.length})</h3>
+            </div>
+          </div>
+          ${labStations.length ? `
+            <div class="airbnb-listings-grid" style="margin-top:16px;">
+              ${labStations.map((w) => {
+                const isFavorited = state.favorites.has(w.id);
+                const softList = w.software || [];
+                const topSoft = softList.slice(0, 3);
+                return `
+                  <article class="airbnb-listing-card">
+                    <div class="listing-visual-wrap" data-action="open-workstation" data-id="${escapeHtml(w.id)}" role="button" tabindex="0">
+                      ${svgWorkstationIllustration(w)}
+                      <div class="listing-badge-overlay">
+                        <span class="listing-status-badge ${statusClass(w.status)}">${escapeHtml(w.status)}</span>
+                      </div>
+                      <button type="button" class="listing-favorite-btn ${isFavorited ? "active" : ""}" 
+                              data-action="toggle-favorite" data-id="${escapeHtml(w.id)}">
+                        ${icon(isFavorited ? "HeartFilled" : "Heart")}
+                      </button>
+                    </div>
+                    <div class="listing-content">
+                      <div class="listing-header-row">
+                        <div class="listing-title-group" data-action="open-workstation" data-id="${escapeHtml(w.id)}">
+                          <h3 class="listing-title">${escapeHtml(w.id)}</h3>
+                          <span class="listing-hostname">${escapeHtml(w.hostname || "Workstation")}</span>
+                        </div>
+                        <span class="listing-os-pill">${escapeHtml(w.os ? w.os.split(" ")[0] : "OS")}</span>
+                      </div>
+                      <div class="listing-software-chips">
+                        ${topSoft.map((s) => `<span class="listing-soft-chip">${escapeHtml(s.name)}</span>`).join("")}
+                      </div>
+                      <button type="button" class="listing-action-btn" data-action="open-workstation" data-id="${escapeHtml(w.id)}">
+                        View Details ${icon("ArrowRight")}
+                      </button>
+                    </div>
+                  </article>
+                `;
+              }).join("")}
+            </div>
+          ` : emptyPanel("No workstations currently assigned to this laboratory.")}
+        </section>
+      </div>
+    `;
+  }
+
+  // All Labs Directory Grid (Airbnb Destinations Style)
+  const query = state.labSearch.trim().toLowerCase();
+  const filteredLabs = labs.filter((l) => {
+    if (!query) return true;
+    return l.name.toLowerCase().includes(query) || (l.room || "").toLowerCase().includes(query);
+  });
+
+  return `
+    <div class="laboratories-view">
+      <!-- Search Lab Bar -->
+      <section class="find-filter-panel" style="margin-bottom:24px;">
+        <form id="lab-search-form" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+          <label class="field search-field" style="flex:1; min-width:240px; margin:0;">
+            <span>Search Laboratory or Room</span>
+            <div class="input-shell">
+              ${icon("Search")}
+              <input name="labSearch" type="search" value="${escapeHtml(state.labSearch)}" placeholder="Search by lab name, department, or room number..." aria-label="Search laboratories" />
+            </div>
+          </label>
+          <button type="submit" class="primary-button">Search Labs</button>
+          ${state.labSearch ? '<button type="button" class="secondary-button" data-action="clear-lab-search">Clear</button>' : ""}
+        </form>
+      </section>
+
+      <!-- Laboratories Destinations Grid -->
+      ${filteredLabs.length ? `
+        <div class="airbnb-destinations-grid">
+          ${filteredLabs.map((lab) => {
+            const labStations = workstations.filter((w) => w.lab === lab.name);
+            const labAvail = labStations.filter((w) => w.status === "Available").length;
+            const pct = labStations.length ? Math.round((labAvail / labStations.length) * 100) : 0;
+            return `
+              <article class="airbnb-destination-card" data-action="select-lab" data-lab="${escapeHtml(lab.name)}">
+                <div class="destination-visual-wrap">
+                  ${svgLabIllustration(lab.name)}
+                  <span class="destination-room-pill">${escapeHtml(lab.room || "Room not reported")}</span>
+                </div>
+                <div class="destination-info">
+                  <h3 class="destination-name">${escapeHtml(lab.name)}</h3>
+                  <div class="destination-meta-row">
+                    <span><strong>${labStations.length}</strong> total PCs</span>
+                    <span>·</span>
+                    <span class="text-available"><strong>${labAvail}</strong> ready (${pct}%)</span>
+                  </div>
+                  <div class="destination-capacity-bar">
+                    <div class="destination-capacity-fill" style="width: ${pct}%;"></div>
+                  </div>
+                  <button type="button" class="destination-explore-btn" data-action="select-lab" data-lab="${escapeHtml(lab.name)}">
+                    Explore Lab Inventory ${icon("ArrowRight")}
+                  </button>
+                </div>
+              </article>
+            `;
+          }).join("")}
+        </div>
+      ` : emptyPanel("No laboratories match your search query. Try another keyword.")}
+    </div>
+  `;
+}
+
+/* ---------------- Main Student Page Dispatcher ---------------- */
 async function renderStudentPage() {
   if (state.page === "Profile") return renderProfilePage();
   if (state.page === "Settings") return renderSettingsPage();
@@ -761,31 +2083,26 @@ async function renderStudentPage() {
     if (!selected) return emptyPanel("This workstation is no longer available to your account. Return to the workstation list and choose another.");
     return renderWorkstationPage({ ...selected, allWorkstations: response.workstations });
   }
-  const params = new URLSearchParams();
-  if (state.search) params.set("software", state.search);
-  if (state.lab) params.set("lab", state.lab);
-  if (state.os) params.set("os", state.os);
-  const [labResponse, workstationResponse] = await Promise.all([
+
+  const t0 = performance.now();
+  const [labResponse, workstationResponse, softwareResponse] = await Promise.all([
     api("/api/student/labs"),
-    api(`/api/student/workstations${params.size ? `?${params}` : ""}`)
+    api("/api/student/workstations"),
+    api("/api/student/software")
   ]);
-  const stations = workstationResponse.workstations.filter((item) => !state.availability || item.status === state.availability);
-  const page = pageItems(stations, "workstations");
-  const availableCount = workstationResponse.workstations.filter((item) => item.status === "Available").length;
-  const inventoryFresh = workstationResponse.workstations.filter((item) => item.inventoryFreshness === "Fresh").length;
-  return `<section class="panel main-panel">
-    <div class="panel-header section-header"><div><p class="eyebrow">Reported workstation data</p><h2>${state.page === "Laboratories" ? "Laboratories" : "Find a workstation"}</h2></div><span class="demo-tag">Live API · reported data</span></div>
-    ${studentFilters(labResponse.labs, workstationResponse.workstations)}
-    <div class="summary-row">
-      <div class="metric-box light"><span>Available now</span><strong>${availableCount}</strong></div>
-      <div class="metric-box light"><span>Registered PCs</span><strong>${workstationResponse.workstations.length}</strong></div>
-      <div class="metric-box light"><span>Fresh inventories</span><strong>${inventoryFresh}</strong></div>
-      <div class="metric-box light"><span>Matching results</span><strong>${stations.length}</strong></div>
-    </div>
-    <p class="data-note">Availability is shown only when the workstation agent has reported a reliable status. Unknown, offline, or stale inventory is not treated as available.</p>
-    ${recordTools()}
-    ${page.items.length ? `${page.controls}<div class="card-grid">${page.items.map(renderWorkstationCard).join("")}</div>` : emptyPanel(state.search ? "No fresh detected software inventory matched that search." : "No registered workstation reports are available yet.")}
-  </section>`;
+  state.apiLatency = Math.round(performance.now() - t0);
+
+  const allWorkstations = workstationResponse.workstations || [];
+  const allLabs = labResponse.labs || [];
+  const allSoftware = softwareResponse.software || [];
+
+  if (state.page === "Dashboard") {
+    return renderStudentDashboard(allWorkstations, allLabs, allSoftware);
+  }
+  if (state.page === "Laboratories") {
+    return renderLaboratoriesPage(allWorkstations, allLabs, allSoftware);
+  }
+  return renderFindWorkstationPage(allWorkstations, allLabs, allSoftware);
 }
 
 function metricBox(label, value, className = "") {
@@ -795,14 +2112,244 @@ function metricBox(label, value, className = "") {
 function adminWorkstationTable(rows) {
   if (!rows.length) return emptyPanel("Register a workstation and install its authorized monitoring agent to begin receiving data.");
   const page = pageItems(rows, "workstations");
-  return `${page.controls}<div class="table-wrap"><table><thead><tr><th>Workstation</th><th>Laboratory</th><th>Status</th><th>OS</th><th>Heartbeat</th><th>Inventory scan</th><th>Health</th><th>Actions</th></tr></thead><tbody>${page.items.map((item) => `<tr>
+  return `${page.controls}<div class="table-wrap"><table><thead><tr>
+    <th>Workstation</th>
+    <th>Laboratory</th>
+    <th>Status</th>
+    <th>IP Address</th>
+    <th>OS</th>
+    <th>Heartbeat</th>
+    <th>Inventory Scan</th>
+    <th>Health</th>
+    <th>Actions</th>
+  </tr></thead><tbody>${page.items.map((item) => {
+    const isRevoked = item.revoked || item.status === "Revoked";
+    return `<tr>
     <td><button type="button" class="table-link" data-action="open-workstation" data-id="${escapeHtml(item.id)}">${escapeHtml(item.id)}</button><span class="table-room">${escapeHtml(item.hostname || "Hostname not reported")}</span>${structuredWorkstationDetails(item)}</td>
-    <td>${escapeHtml(item.lab)}<span class="table-room">${escapeHtml(item.room || "Room not reported")}</span></td><td>${badge(item.status)}</td>
-    <td>${escapeHtml(item.os || "Not available")}</td><td>${escapeHtml(formatDate(item.lastHeartbeat))}</td>
+    <td>${escapeHtml(item.lab)}<span class="table-room">${escapeHtml(item.room || "Room not reported")}</span></td>
+    <td>${isRevoked ? `<span class="badge danger">Revoked</span>` : badge(item.status)}</td>
+    <td><strong>${escapeHtml(item.ipAddress || "Not reported")}</strong><span class="table-room">v${escapeHtml(item.agentVersion || "1.0.0")}</span></td>
+    <td>${escapeHtml(item.os || "Not available")}</td>
+    <td>${escapeHtml(formatDate(item.lastHeartbeat))}</td>
     <td>${escapeHtml(formatDate(item.lastInventoryScan))}<span class="table-room">${escapeHtml(item.inventoryFreshness)}</span></td>
     <td>${escapeHtml(item.health?.cpuPercent == null ? "Not available" : `${item.health.cpuPercent}% CPU`)}<span class="table-room">${escapeHtml(item.health?.network || "Not available")} network</span></td>
-    <td class="table-actions"><button type="button" class="secondary-button compact-button" data-action="toggle-maintenance" data-id="${escapeHtml(item.id)}" data-maintenance="${item.status === "Maintenance"}">${item.status === "Maintenance" ? "Restore" : "Maintenance"}</button><button type="button" class="secondary-button compact-button" data-action="rotate-agent-token" data-id="${escapeHtml(item.id)}">Rotate token</button></td>
-  </tr>`).join("")}</tbody></table></div>`;
+    <td class="table-actions">
+      ${isRevoked ? `
+        <button type="button" class="primary-button compact-button" data-action="reconnect-workstation" data-id="${escapeHtml(item.id)}" title="Generate a one-command PowerShell installer to re-enroll this PC">Re-enroll</button>
+        <button type="button" class="secondary-button compact-button delete-pc-btn" data-action="delete-workstation" data-id="${escapeHtml(item.id)}" title="Permanently delete this registered workstation">Delete</button>
+      ` : `
+        <button type="button" class="secondary-button compact-button" data-action="reconnect-workstation" data-id="${escapeHtml(item.id)}" title="Generate a one-command PowerShell installer to reconnect this PC">Reconnect</button>
+        <button type="button" class="secondary-button compact-button" data-action="toggle-maintenance" data-id="${escapeHtml(item.id)}" data-maintenance="${item.status === "Maintenance"}">${item.status === "Maintenance" ? "Restore" : "Maintenance"}</button>
+        <button type="button" class="secondary-button compact-button danger-button-text" data-action="revoke-workstation" data-id="${escapeHtml(item.id)}" title="Revoke agent token immediately">Revoke</button>
+        <button type="button" class="secondary-button compact-button delete-pc-btn" data-action="delete-workstation" data-id="${escapeHtml(item.id)}" title="Permanently delete this registered workstation">Delete</button>
+      `}
+    </td>
+  </tr>`;
+  }).join("")}</tbody></table></div>`;
+}
+
+function renderActiveEnrollmentCard(enrollment) {
+  const isCompleted = enrollment.status === "completed";
+  const isFailed = enrollment.status === "failed";
+  const isExpired = enrollment.status === "expired";
+  const isRevoked = enrollment.status === "revoked";
+
+  const getStepState = (stepNumber) => {
+    if (isCompleted) return "completed";
+    if (isFailed || isExpired || isRevoked) return "halted";
+    const statusMap = {
+      pending: 1,
+      command_executed: 2,
+      installing: 2,
+      registering: 3,
+      claimed: 3,
+      completed: 4
+    };
+    const current = statusMap[enrollment.status] || 1;
+    if (current > stepNumber) return "completed";
+    if (current === stepNumber) return "active";
+    return "pending";
+  };
+
+  return `<div class="enrollment-active-card ${isCompleted ? "enrollment-completed-card" : ""}" id="active-enrollment-panel">
+    <div class="enrollment-card-header">
+      <div class="enrollment-card-title">
+        <span class="pulse-indicator ${isCompleted ? "pulse-success" : isFailed ? "pulse-failed" : "pulse-active"}"></span>
+        <div>
+          <h4>${isCompleted ? "Workstation Connected Successfully!" : `Waiting for Connection: ${escapeHtml(enrollment.workstationId)}`}</h4>
+          <p class="muted-copy">Laboratory: <strong>${escapeHtml(enrollment.lab || "Main Laboratory")}</strong> ${enrollment.room ? `· ${escapeHtml(enrollment.room)}` : ""} · Token valid for 15 minutes</p>
+        </div>
+      </div>
+      <div class="enrollment-card-actions">
+        <button type="button" class="secondary-button compact-button" data-action="dismiss-enrollment">
+          ${isCompleted ? "Close Banner" : "Dismiss"}
+        </button>
+      </div>
+    </div>
+
+    ${!isCompleted ? `
+      <div class="enrollment-body">
+        <div class="enrollment-instructions">
+          <strong>Step 1:</strong> On the computer you want to add (<strong>${escapeHtml(enrollment.workstationId)}</strong>), open <strong>PowerShell as Administrator</strong>.<br>
+          <strong>Step 2:</strong> Paste and run this one-line setup command:
+        </div>
+
+        <div class="enrollment-command-container">
+          <div class="command-box-shell">
+            <pre><code>${escapeHtml(enrollment.command)}</code></pre>
+          </div>
+          <button type="button" class="primary-button copy-cmd-btn" data-action="copy-enroll-command">
+            ${state.enrollmentCopied ? "✓ Copied to Clipboard!" : "📋 Copy PowerShell Command"}
+          </button>
+        </div>
+
+        <!-- 4-step live visual progress tracker -->
+        <div class="enrollment-progress-tracker">
+          <div class="progress-step step-${getStepState(1)}">
+            <div class="step-circle">${getStepState(1) === "completed" ? "✓" : "1"}</div>
+            <div class="step-info">
+              <span class="step-title">Command Ready</span>
+              <span class="step-sub">Awaiting execution</span>
+            </div>
+          </div>
+          <div class="progress-divider"></div>
+          <div class="progress-step step-${getStepState(2)}">
+            <div class="step-circle">${getStepState(2) === "completed" ? "✓" : "2"}</div>
+            <div class="step-info">
+              <span class="step-title">Connecting</span>
+              <span class="step-sub">Installer running</span>
+            </div>
+          </div>
+          <div class="progress-divider"></div>
+          <div class="progress-step step-${getStepState(3)}">
+            <div class="step-circle">${getStepState(3) === "completed" ? "✓" : "3"}</div>
+            <div class="step-info">
+              <span class="step-title">Self-Registering</span>
+              <span class="step-sub">Keys exchange</span>
+            </div>
+          </div>
+          <div class="progress-divider"></div>
+          <div class="progress-step step-${getStepState(4)}">
+            <div class="step-circle">${getStepState(4) === "completed" ? "✓" : "4"}</div>
+            <div class="step-info">
+              <span class="step-title">Online & Active</span>
+              <span class="step-sub">Live telemetry</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="enrollment-status-bar">
+          <span class="status-pill status-${enrollment.status}">
+            ${escapeHtml(enrollment.status.toUpperCase().replace("_", " "))}
+          </span>
+          <span class="status-message">${escapeHtml(enrollment.progressMessage || "Waiting for target computer to execute the command...")}</span>
+          ${enrollment.targetIp ? `<span class="target-ip-badge">IP: ${escapeHtml(enrollment.targetIp)}</span>` : ""}
+        </div>
+      </div>
+    ` : `
+      <div class="enrollment-success-content">
+        <div class="success-icon-banner">🎉</div>
+        <div class="success-details">
+          <h3>${escapeHtml(enrollment.workstationId)} is Live and Connected!</h3>
+          <p>The monitoring agent has successfully registered, verified telemetry, and is transmitting real-time hardware metrics and software inventory.</p>
+          ${enrollment.targetHostname ? `<p class="device-meta">Hostname: <strong>${escapeHtml(enrollment.targetHostname)}</strong> · IP: <strong>${escapeHtml(enrollment.targetIp || "LAN")}</strong></p>` : ""}
+        </div>
+        <div class="success-actions">
+          <button type="button" class="primary-button" data-action="open-workstation" data-id="${escapeHtml(enrollment.workstationId)}">
+            View Workstation Dashboard
+          </button>
+          <button type="button" class="secondary-button" data-action="dismiss-enrollment">
+            Add Another Workstation
+          </button>
+        </div>
+      </div>
+    `}
+  </div>`;
+}
+
+function renderLegacyCredentialPanel(credential) {
+  return `<div class="credential-panel" role="status">
+    <div class="credential-panel-header" style="display:flex; justify-content:space-between; align-items:center;">
+      <strong>⚠️ Manual Agent Credential Generated</strong>
+      <button type="button" class="compact-button secondary-button" data-action="dismiss-legacy-credential">Dismiss</button>
+    </div>
+    <p>Workstation ID: <strong>${escapeHtml(credential.workstationId)}</strong></p>
+    <code>${escapeHtml(credential.agentToken)}</code>
+    <div class="credential-actions" style="margin: 8px 0;">
+      <button type="button" class="secondary-button" data-action="copy-token">Copy token</button>
+    </div>
+    <p class="credential-note">Configure the authorized computer by pasting this token into <code>agent/.env</code> (<code>AGENT_TOKEN=${escapeHtml(credential.agentToken)}</code>). Do not share it.</p>
+  </div>`;
+}
+
+function renderWorkstationsAdminView(overview, filteredStations, stations) {
+  const workstationDraft = state.workstationDraft || {};
+  const activeEnrollment = state.activeEnrollment;
+  const legacyCredential = state.agentCredential;
+  const showManual = state.showManualSetup;
+
+  const nextId = workstationDraft.id || `WS-${String(stations.length + 1).padStart(3, "0")}`;
+
+  return `<div class="admin-view">
+    ${overview}
+    <section class="panel admin-table-panel">
+      <div class="panel-header section-header">
+        <div>
+          <p class="eyebrow">Zero-Friction Device Setup</p>
+          <h3>Connect New Workstation</h3>
+          <p class="section-subtitle">Add a computer to the laboratory tracker. One PowerShell command on the target computer handles downloading, agent setup, self-registration, and background auto-start.</p>
+        </div>
+        <div class="header-action-group">
+          <button type="button" class="secondary-button compact-button" data-action="toggle-manual-mode">
+            ${showManual ? "Switch to 1-Command Auto Setup" : "Manual Token Setup"}
+          </button>
+        </div>
+      </div>
+
+      <!-- Active 1-Command Enrollment Banner (if active) -->
+      ${activeEnrollment ? renderActiveEnrollmentCard(activeEnrollment) : ""}
+
+      <!-- Legacy Token Banner (if manual token was generated) -->
+      ${legacyCredential ? renderLegacyCredentialPanel(legacyCredential) : ""}
+
+      <!-- Workstation Registration Form -->
+      <form id="register-workstation-form" class="register-device-form modern-enroll-form">
+        <input type="hidden" name="setupMode" value="${showManual ? "manual" : "automated"}" />
+        <div class="form-grid-3">
+          ${field("Workstation ID", "id", "text", true, "e.g. WS-001, LAB-PC-12", workstationDraft.id || nextId)}
+          ${field("Laboratory", "lab", "text", true, "e.g. Software Engineering Lab", workstationDraft.lab || "")}
+          ${field("Room / Location", "room", "text", false, "e.g. Room 302, Floor 3", workstationDraft.room || "")}
+        </div>
+        
+        <div class="enroll-form-footer">
+          <div class="enroll-hint">
+            ${showManual ? `
+              <span class="hint-icon">⚙️</span>
+              <span><strong>Manual Mode:</strong> Registers database entry and provides raw agent token for custom <code>.env</code> configurations.</span>
+            ` : `
+              <span class="hint-icon">🚀</span>
+              <span><strong>Auto-Setup (Recommended):</strong> Generates an instant, pre-configured PowerShell command. No python or manual file editing needed on the target PC.</span>
+            `}
+          </div>
+          <button class="primary-button enroll-submit-btn" type="submit">
+            ${showManual ? "Register & Generate Token" : "⚡ Generate 1-Command Installer"}
+          </button>
+        </div>
+      </form>
+
+      <!-- Table Section -->
+      <div class="table-section-divider"></div>
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Authorized Devices Directory</p>
+          <h3>Workstation Management</h3>
+        </div>
+      </div>
+      ${adminSearchForm({ statuses: true })}
+      ${recordTools()}
+      ${adminWorkstationTable(filteredStations)}
+    </section>
+  </div>`;
 }
 
 function adminSearchForm({ statuses = false, placeholder = "Search workstations, labs, or software" } = {}) {
@@ -857,11 +2404,7 @@ async function renderAdminPage() {
     return `<div class="admin-view">${overview}<section class="panel admin-table-panel"><div class="panel-header"><div><p class="eyebrow">Workstation directory</p><h3>Latest device reports</h3></div></div>${adminSearchForm({ statuses: true })}${recordTools()}${adminWorkstationTable(filteredStations)}</section><section class="panel"><div class="panel-header"><div><p class="eyebrow">Open issues</p><h3>Alerts requiring attention</h3></div></div>${alertPage.items.length ? `${alertPage.controls}<div class="issue-list">${alertPage.items.map(alertCard).join("")}</div>` : emptyPanel("No unresolved agent alerts have been reported.")}</section></div>`;
   }
   if (state.page === "Workstations") {
-    const workstationDraft = state.workstationDraft || {};
-    return `<div class="admin-view">${overview}<section class="panel admin-table-panel"><div class="panel-header"><div><p class="eyebrow">Authorized devices</p><h3>Workstation management</h3></div></div><form id="register-workstation-form" class="register-device-form">
-      ${field("Workstation ID", "id", "text", true, "", workstationDraft.id || "")}${field("Laboratory", "lab", "text", true, "", workstationDraft.lab || "")}${field("Room", "room", "text", false, "", workstationDraft.room || "")}<button class="primary-button" type="submit">Register workstation</button>
-    </form>${state.agentCredential ? `<div class="credential-panel" role="status"><strong>Copy this agent credential now. It is shown only once.</strong><p>Workstation: ${escapeHtml(state.agentCredential.workstationId)}</p><code>${escapeHtml(state.agentCredential.agentToken)}</code><button type="button" class="secondary-button" data-action="copy-token">Copy token</button><p>Configure the authorized computer with this ID and token. Do not share it.</p></div>` : ""}
-      ${adminSearchForm({ statuses: true })}${recordTools()}${adminWorkstationTable(filteredStations)}</section></div>`;
+    return renderWorkstationsAdminView(overview, filteredStations, stations);
   }
   if (state.page === "Laboratories") {
     const labs = [...new Map(stations.map((item) => [item.lab, item])).values()];
@@ -1021,7 +2564,37 @@ app.addEventListener("click", async (event) => {
     return;
   }
   const action = target.dataset.action;
-  if (action === "open-workstation") {
+  if (action === "toggle-user-dropdown") {
+    state.userMenuOpen = !state.userMenuOpen;
+    renderShell(document.getElementById("page-content")?.innerHTML || "");
+    return;
+  } else if (action === "toggle-theme") {
+    const current = themePreference();
+    const next = current === "dark" || (current === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "light" : "dark";
+    setThemePreference(next);
+    state.error = "";
+    state.message = `Theme switched to ${next} mode.`;
+    await refresh();
+    return;
+  } else if (action === "toggle-favorite") {
+    const wsId = target.dataset.id;
+    if (wsId) {
+      if (state.favorites.has(wsId)) {
+        state.favorites.delete(wsId);
+      } else {
+        state.favorites.add(wsId);
+      }
+      try {
+        localStorage.setItem("lab-favorites", JSON.stringify([...state.favorites]));
+      } catch {}
+      await refresh();
+    }
+    return;
+  } else if (action === "select-category") {
+    state.activeCategory = target.dataset.category || "All Workstations";
+    await refresh();
+    return;
+  } else if (action === "open-workstation") {
     state.returnPage = state.page === "System details" ? state.returnPage : state.page;
     state.selectedWorkstationId = target.dataset.id;
     state.workstationSoftwareSearch = "";
@@ -1053,11 +2626,82 @@ app.addEventListener("click", async (event) => {
   } else if (action === "refresh") {
     state.error = "";
     await refresh();
+  } else if (action === "quick-nav") {
+    state.page = target.dataset.target || "Dashboard";
+    if (target.dataset.filter) state.availability = target.dataset.filter;
+    if (target.dataset.focus === "software") {
+      state.search = "";
+    }
+    state.selectedLabName = "";
+    state.selectedWorkstationId = "";
+    state.listPages = {};
+    state.error = "";
+    state.message = "";
+    await refresh();
+  } else if (action === "nav-filter") {
+    state.page = target.dataset.nav || "Find a Workstation";
+    if (target.dataset.filter) state.availability = target.dataset.filter;
+    if (target.dataset.lab) state.lab = target.dataset.lab;
+    state.selectedLabName = "";
+    state.selectedWorkstationId = "";
+    state.listPages = {};
+    state.error = "";
+    state.message = "";
+    await refresh();
+  } else if (action === "donut-status") {
+    state.page = "Find a Workstation";
+    state.availability = target.dataset.status || "";
+    state.selectedLabName = "";
+    state.selectedWorkstationId = "";
+    state.listPages = {};
+    state.error = "";
+    state.message = "";
+    await refresh();
+  } else if (action === "select-lab") {
+    state.page = "Laboratories";
+    state.selectedLabName = target.dataset.lab || "";
+    state.selectedWorkstationId = "";
+    state.listPages = {};
+    state.error = "";
+    state.message = "";
+    await refresh();
+  } else if (action === "back-to-labs") {
+    state.page = "Laboratories";
+    state.selectedLabName = "";
+    state.selectedWorkstationId = "";
+    state.listPages = {};
+    state.error = "";
+    state.message = "";
+    await refresh();
+  } else if (action === "select-software") {
+    state.page = "Find a Workstation";
+    state.search = target.dataset.software || "";
+    state.selectedLabName = "";
+    state.selectedWorkstationId = "";
+    state.listPages = {};
+    state.error = "";
+    state.message = "";
+    await refresh();
+  } else if (action === "set-view-mode") {
+    state.viewMode = target.dataset.mode || "grid";
+    await refresh();
+  } else if (action === "clear-filter-chip") {
+    const fType = target.dataset.filterType;
+    if (fType === "search") state.search = "";
+    if (fType === "lab") state.lab = "";
+    if (fType === "os") state.os = "";
+    if (fType === "availability") state.availability = "";
+    state.listPages = {};
+    await refresh();
+  } else if (action === "clear-lab-search") {
+    state.labSearch = "";
+    await refresh();
   } else if (action === "clear-student-filters") {
     state.search = "";
     state.lab = "";
     state.os = "";
     state.availability = "";
+    state.sortBy = "id-asc";
     state.listPages = {};
     await refresh();
   } else if (action === "clear-admin-search") {
@@ -1081,6 +2725,8 @@ app.addEventListener("click", async (event) => {
     target.dataset.expanded = String(!expanded);
     target.textContent = expanded ? "Expand all" : "Collapse all";
   } else if (action === "logout") {
+    stopEnrollmentPolling();
+    state.activeEnrollment = null;
     try {
       await api("/api/auth/logout", { method: "POST", body: "{}" });
       state.error = "";
@@ -1098,6 +2744,87 @@ app.addEventListener("click", async (event) => {
       await refresh();
     } catch {
       state.error = "Clipboard access is unavailable. Copy the token from the visible credential field.";
+      await refresh();
+    }
+  } else if (action === "copy-enroll-command") {
+    if (state.activeEnrollment?.command) {
+      try {
+        await navigator.clipboard.writeText(state.activeEnrollment.command);
+        state.enrollmentCopied = true;
+        await refresh({ preserveFocus: true });
+        setTimeout(() => {
+          state.enrollmentCopied = false;
+          refresh({ preserveFocus: true });
+        }, 3000);
+      } catch {
+        state.error = "Clipboard access is unavailable. Select and copy the command text manually.";
+        await refresh();
+      }
+    }
+  } else if (action === "dismiss-enrollment") {
+    stopEnrollmentPolling();
+    state.activeEnrollment = null;
+    state.enrollmentCopied = false;
+    await refresh();
+  } else if (action === "dismiss-legacy-credential") {
+    state.agentCredential = null;
+    await refresh();
+  } else if (action === "toggle-manual-mode") {
+    state.showManualSetup = !state.showManualSetup;
+    await refresh();
+  } else if (action === "reconnect-workstation") {
+    const workstationId = target.dataset.id;
+    try {
+      const reconnectData = await api(`/api/admin/workstations/${encodeURIComponent(workstationId)}/reconnect`, {
+        method: "POST",
+        body: "{}"
+      });
+      state.activeEnrollment = reconnectData;
+      state.enrollmentCopied = false;
+      state.page = "Workstations";
+      state.message = `Generated 1-command installer for ${workstationId}! Run it on the lab computer.`;
+      startEnrollmentPolling(reconnectData.enrollmentId);
+      await refresh();
+      document.getElementById("active-enrollment-panel")?.scrollIntoView({ behavior: "smooth" });
+    } catch (err) {
+      state.error = err.message;
+      await refresh();
+    }
+  } else if (action === "revoke-workstation") {
+    const workstationId = target.dataset.id;
+    if (!window.confirm(`Revoke access for workstation ${workstationId}?\n\nThe agent on this computer will be immediately disconnected and cannot submit metrics or software inventory until re-enrolled.`)) {
+      return;
+    }
+    try {
+      await api(`/api/admin/workstations/${encodeURIComponent(workstationId)}/revoke`, {
+        method: "POST",
+        body: "{}"
+      });
+      state.message = `Workstation ${workstationId} access has been revoked.`;
+      state.error = "";
+      await refresh();
+    } catch (err) {
+      state.error = err.message;
+      await refresh();
+    }
+  } else if (action === "delete-workstation") {
+    const workstationId = target.dataset.id;
+    if (!window.confirm(`Permanently delete workstation ${workstationId}?\n\nThis will remove the workstation from the system, including its software inventory, metrics history, alerts, and enrollment records.\n\nThis action cannot be undone.`)) {
+      return;
+    }
+    try {
+      await api(`/api/admin/workstations/${encodeURIComponent(workstationId)}`, {
+        method: "DELETE"
+      });
+      state.message = `Workstation ${workstationId} has been permanently deleted.`;
+      state.error = "";
+      if (state.selectedWorkstationId === workstationId) {
+        state.selectedWorkstationId = null;
+        state.page = "Workstations";
+      }
+      await refresh();
+    } catch (err) {
+      state.error = err.message;
       await refresh();
     }
   } else if (action === "rotate-agent-token") {
@@ -1370,12 +3097,33 @@ async function handleFormSubmit(form) {
     return;
   }
 
+  if (formId === "airbnb-search-form") {
+    state.search = String(values.software || "").trim();
+    state.lab = values.lab || "";
+    state.availability = values.availability || "";
+    state.page = "Find a Workstation";
+    state.selectedLabName = "";
+    state.selectedWorkstationId = "";
+    state.listPages = {};
+    state.error = "";
+    state.message = "";
+    await refresh();
+    return;
+  }
+
   if (formId === "student-search-form") {
     state.search = String(values.software || "").trim();
-    state.lab = values.lab;
-    state.os = values.os;
-    state.availability = values.availability;
+    state.lab = values.lab || "";
+    state.os = values.os || "";
+    state.availability = values.availability || "";
+    state.sortBy = values.sortBy || "id-asc";
     state.listPages = {};
+    await refresh({ preserveFocus: true });
+    return;
+  }
+
+  if (formId === "lab-search-form") {
+    state.labSearch = String(values.labSearch || "").trim();
     await refresh({ preserveFocus: true });
     return;
   }
@@ -1456,31 +3204,51 @@ async function handleFormSubmit(form) {
   }
 
   if (formId === "register-workstation-form") {
+    const isManual = form.querySelector('input[name="setupMode"]')?.value === "manual";
     const draft = {
-      id: String(values.id || "").trim().toUpperCase(),
+      workstationId: String(values.id || "").trim().toUpperCase(),
       lab: String(values.lab || "").trim(),
       room: String(values.room || "").trim()
     };
-    state.workstationDraft = draft;
+    state.workstationDraft = { id: draft.workstationId, lab: draft.lab, room: draft.room };
     let invalid = null;
-    if (!/^[A-Z0-9-]{2,32}$/.test(draft.id)) invalid = ["id", "Use 2 to 32 letters, numbers, or hyphens for the workstation ID."];
-    else if (!draft.lab) invalid = ["lab", "Enter the laboratory name."];
+    if (draft.workstationId && !/^[A-Z0-9-]{2,32}$/.test(draft.workstationId)) {
+      invalid = ["id", "Use 2 to 32 letters, numbers, or hyphens for the workstation ID."];
+    } else if (!draft.lab) {
+      invalid = ["lab", "Enter the laboratory name."];
+    }
     if (invalid) {
       injectFieldError(form, invalid[0], invalid[1]);
       return;
     }
+
     try {
-      state.agentCredential = await api("/api/admin/workstations", {
-        method: "POST",
-        body: JSON.stringify(draft)
-      });
-      state.workstationDraft = null;
-      state.message = "Workstation registered. Copy the credential now and configure its authorized agent.";
+      if (isManual) {
+        state.agentCredential = await api("/api/admin/workstations", {
+          method: "POST",
+          body: JSON.stringify({ id: draft.workstationId, lab: draft.lab, room: draft.room })
+        });
+        state.activeEnrollment = null;
+        state.workstationDraft = null;
+        state.message = "Workstation registered. Copy the manual credential below and configure its agent.";
+      } else {
+        const enrollData = await api("/api/admin/enrollment/generate", {
+          method: "POST",
+          body: JSON.stringify(draft)
+        });
+        state.activeEnrollment = enrollData;
+        state.enrollmentCopied = false;
+        state.agentCredential = null;
+        state.workstationDraft = null;
+        state.message = `Generated 1-command installer for ${enrollData.workstationId}! Paste it into PowerShell on the lab computer.`;
+        startEnrollmentPolling(enrollData.enrollmentId);
+      }
       await refresh();
     } catch (error) {
       state.error = error.message;
       await refresh();
     }
+    return;
   }
 }
 
@@ -1488,7 +3256,7 @@ app.addEventListener("input", (event) => {
   const input = event.target;
   if (!(input instanceof HTMLInputElement) || input.type !== "search") return;
   const form = input.form;
-  if (!form || !["student-search-form", "admin-search-form", "workstation-software-search"].includes(form.id)) return;
+  if (!form || !["student-search-form", "admin-search-form", "workstation-software-search", "lab-search-form"].includes(form.id)) return;
   window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(() => {
     if (form.isConnected) form.requestSubmit();
@@ -1507,6 +3275,14 @@ app.addEventListener("change", (event) => {
   if (!(select instanceof HTMLSelectElement) || !select.form) return;
   if (["student-search-form", "admin-search-form"].includes(select.form.id)) {
     select.form.requestSubmit();
+  }
+});
+
+document.addEventListener("click", (event) => {
+  if (state.userMenuOpen && !event.target.closest(".airbnb-user-menu-wrapper")) {
+    state.userMenuOpen = false;
+    const menu = document.getElementById("user-dropdown-menu");
+    if (menu) menu.remove();
   }
 });
 
