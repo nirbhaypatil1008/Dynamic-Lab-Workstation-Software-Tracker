@@ -4637,3 +4637,111 @@ th {
   border-color: #dc2626 !important;
   color: #b91c1c !important;
 }
+
+/* ==========================================================================
+   Admin Sub-Navigation Tab Bar
+   ========================================================================== */
+.admin-subnav-wrapper {
+  margin-bottom: 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 6px 10px;
+  box-shadow: var(--shadow-capsule);
+  display: flex;
+  align-items: center;
+}
+
+.admin-subnav-scroll {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  width: 100%;
+  padding: 2px;
+}
+
+.admin-subnav-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.admin-subnav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.admin-subnav-tab:hover {
+  color: var(--text);
+  background: var(--surface-soft);
+}
+
+.admin-subnav-tab.active {
+  background: var(--navy);
+  color: #ffffff;
+  border-color: var(--navy);
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+:root[data-theme="dark"] .admin-subnav-tab.active {
+  background: var(--airbnb-coral);
+  color: #ffffff;
+  border-color: var(--airbnb-coral);
+}
+
+.admin-subnav-tab svg {
+  width: 16px;
+  height: 16px;
+}
+
+.admin-subnav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: var(--airbnb-coral);
+  color: #ffffff;
+  line-height: 1;
+}
+
+.admin-subnav-tab.active .admin-subnav-badge {
+  background: #ffffff;
+  color: var(--navy);
+}
+
+:root[data-theme="dark"] .admin-subnav-tab.active .admin-subnav-badge {
+  background: #ffffff;
+  color: var(--airbnb-coral);
+}
+
+@media (max-width: 768px) {
+  .admin-subnav-wrapper {
+    border-radius: var(--radius);
+    padding: 6px 8px;
+  }
+  .admin-subnav-tab {
+    padding: 7px 12px;
+    font-size: 0.82rem;
+  }
+}
+

@@ -18,6 +18,7 @@ import AdminAlerts from "./pages/admin/AdminAlerts.jsx";
 import AdminMaintenance from "./pages/admin/AdminMaintenance.jsx";
 import AdminReports from "./pages/admin/AdminReports.jsx";
 import AdminAccounts from "./pages/admin/AdminAccounts.jsx";
+import AdminNavTabs from "./components/admin/AdminNavTabs.jsx";
 import { staticPages } from "./utils/constants.js";
 
 export default function App() {
@@ -292,6 +293,17 @@ export default function App() {
       {/* Admin Pages */}
       {user.role === "admin" && (
         <>
+          {[
+            "Overview",
+            "Workstations",
+            "Software Inventory",
+            "System Health",
+            "Alerts",
+            "Maintenance",
+            "Reports",
+            "Accounts"
+          ].includes(page) && <AdminNavTabs alerts={adminData.alerts} />}
+
           {page === "Overview" && (
             <AdminOverview
               dashboard={adminData.dashboard}
